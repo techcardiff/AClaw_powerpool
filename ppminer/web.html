@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Power Pool Miner</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --mute:#6b6b66; --line:#e3e3de;
+          --ok:#1f7a4d; --bad:#b3261e; --warn:#9a6700; --run:#2459a6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --panel:#1f1f1d; --ink:#ecece8; --mute:#9a9a93; --line:#33332f;
+            --ok:#4cc38a; --bad:#ff8a80; --warn:#e0b252; --run:#7aa7f0; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system,system-ui,sans-serif }
+  header { padding:16px 24px; display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; border-bottom:1px solid var(--line) }
+  h1 { font-size:18px; margin:0 } .mute { color:var(--mute) }
+  main { padding:16px 24px; display:grid; gap:16px }
+  .tiles { display:flex; gap:12px; flex-wrap:wrap }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; min-width:120px }
+  .tile b { display:block; font-size:20px; font-variant-numeric:tabular-nums }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden }
+  section h2 { font-size:14px; margin:0; padding:10px 14px; border-bottom:1px solid var(--line) }
+  .scroll { overflow-x:auto }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums }
+  th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); vertical-align:top }
+  th { color:var(--mute); font-weight:500; font-size:12px }
+  code { font:12px ui-monospace,Menlo,monospace; word-break:break-all }
+  .pill { font-size:12px; padding:1px 8px; border-radius:10px; border:1px solid currentColor; white-space:nowrap }
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)} .run{color:var(--run)}
+  button { font:inherit; padding:5px 12px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer }
+  button:hover { border-color:var(--mute) }
+  details summary { cursor:pointer; color:var(--mute) } pre { white-space:pre-wrap; margin:6px 0; font:12px/1.5 ui-monospace,Menlo,monospace }
+</style>
+</head>
+<body>
+<header>
+  <h1>Power Pool Miner</h1>
+  <span class="mute" id="updated">loading…</span>
+  <span class="mute">refreshes every 5 s</span>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <section>
+    <h2>BRAIN accounts</h2>
+    <div style="padding:10px 14px; display:grid; gap:10px">
+      <div id="accounts" class="mute">checking sessions…</div>
+      <div class="mute">1. Open the login in a Chrome profile (one profile per account) and do the face scan.
+        2. Click <b>Save sessions</b> — macOS may ask once to allow "Chrome Safe Storage".</div>
+      <div id="profiles" style="display:flex; gap:8px; flex-wrap:wrap"></div>
+      <div class="mute">Or: send the face-scan link to the account owner's Telegram.</div>
+      <div id="telegram" style="display:flex; gap:8px; flex-wrap:wrap"></div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+        <button id="grab">Save sessions</button>
+        <button id="refresh">Refresh status</button>
+        <span id="loginmsg" class="mute"></span>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2>Pick list — one alpha per correlation cluster</h2>
+    <div class="mute" style="padding:8px 14px 0">Alphas whose daily PnL correlates ≥ 0.5 (last 4 years) are folded into the
+      best one. Approving only marks it ready; nothing is submitted from here.</div>
+    <div class="scroll"><table id="picks"></table></div>
+  </section>
+  <section>
+    <h2>Lane C — regular alpha candidates</h2>
+    <div class="mute" style="padding:8px 14px 0">Regular bar: every check PASS (sharpe ≥ 1.58, fitness ≥ 1.0, self-correlation &lt; 0.7 …).
+      "near" = only tunable checks fail; the runner tries settings variants for these.</div>
+    <div class="scroll"><table id="regular"></table></div>
+  </section>
+  <section><h2>Re-simulations</h2><div class="scroll"><table id="resims"></table></div></section>
+  <section><h2>Fields BRAIN rejected (skipped from now on)</h2><div id="blocked" style="padding:10px 14px"></div></section>
+  <section><h2>Descriptions (Qwen3.8)</h2><div class="scroll"><table id="described"></table></div></section>
+  <section><h2>Latest rewrites (Qwen3.8)</h2><div class="scroll"><table id="rewrites"></table></div></section>
+</main>
+<script>
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const num = (v, d=2) => v == null ? "–" : Number(v).toFixed(d);
+const ds = j => { try { return JSON.parse(j).join(", ") } catch { return "" } };
+
+function verdict(r) {
+  if (r.status === "running" || r.status === "queued") return `<span class="pill run">${r.status}</span>`;
+  if (r.status === "error") return '<span class="pill bad">error</span>';
+  // verdict computed server-side (ppminer/verdict.py) from BRAIN's /check output
+  const label = {pp_ok: ["ok", "PP candidate"], risky: ["warn", "PP but risky"],
+                 pending: ["run", "PP check pending"], not_pp: ["bad", "not PP"]}[r.verdict] || ["mute", r.verdict];
+  return `<span class="pill ${label[0]}">${label[1]}</span>`
+    + (r.reasons && r.reasons.length ? `<div class="mute">${esc(r.reasons.join(", "))}</div>` : "")
+    + (r.themes && r.themes.length ? `<div class="mute">theme: ${esc(r.themes.join(", "))}</div>` : "");
+}
+
+async function tick() {
+  let s;
+  try { s = await (await fetch("/api/state")).json(); }
+  catch { document.getElementById("updated").textContent = "server not reachable"; return; }
+  if (window.serverVersion && s.version !== window.serverVersion) { location.reload(); return; }
+  window.serverVersion = s.version;
+  document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  const st = s.status, rs = s.resims;
+  const done = rs.filter(r => r.status === "done");
+  const run = s.runner || {};
+  const tiles = [
+    ["runner", run.status ? `${run.status}${run.sims != null ? ` · ${run.sims} sims` : ""}` : "not started"],
+    ["PP-ready (single cat.)", st.pp_ready], ["PP-shaped, mixed cat. (Lane A)", st.pp_multi], ["explore ideas (Lane A)", st.explore],
+    ["to rewrite", st.purify], ["rewrites (valid)", `${s.rewrite_counts.valid} / ${s.rewrite_counts.total}`],
+    ["re-sims done", done.length], ["PP candidates", done.filter(r => r.verdict === "pp_ok").length],
+    ["picks (approved)", `${s.picks.length} (${s.picks.filter(p => p.status === "approved").length})`],
+    ["queued / running", rs.filter(r => r.status === "queued" || r.status === "running").length],
+    ["errors", rs.filter(r => r.status === "error").length], ["descriptions", s.described.length],
+    ["regular ready / near (Lane C)", `${s.regular.filter(r => r.reg_verdict === "reg_ok").length} / ${s.regular.filter(r => r.reg_verdict === "near").length}`],
+    ...s.field_sync.map(f => [`fields synced · ${f.account} ${f.region} D${f.delay}`, `${f.datasets}/${f.datasets_total} ds · ${f.fields}`]),
+  ];
+  document.getElementById("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><span class="mute">${k}</span><b>${v ?? 0}</b></div>`).join("");
+
+  const regPill = {reg_ok: ["ok", "regular ready"], near: ["warn", "near"], pending: ["run", "checks pending"]};
+  document.getElementById("regular").innerHTML = s.regular.length
+    ? "<tr><th>alpha</th><th>lane</th><th>dataset</th><th>sharpe</th><th>fitness</th><th>TO</th><th>status</th><th>expression</th></tr>" +
+      s.regular.map(r => `<tr><td>${esc(r.alpha_id)}<div class="mute">#${r.candidate_id} · ${esc(r.account)}</div></td>
+        <td>${esc(r.lane || "-")}<div class="mute">${esc(r.purpose || "")}</div></td><td>${esc(ds(r.datasets))}</td>
+        <td><b>${num(r.sharpe)}</b></td><td>${num(r.fitness)}</td><td>${num(r.turnover)}</td>
+        <td><span class="pill ${regPill[r.reg_verdict][0]}">${regPill[r.reg_verdict][1]}</span>
+          ${r.reg_fails.length ? `<div class="mute">${esc(r.reg_fails.join(", "))}</div>` : ""}</td>
+        <td><code>${esc(r.expr)}</code></td></tr>`).join("")
+    : '<tr><td class="mute">No regular candidates yet.</td></tr>';
+
+  document.getElementById("resims").innerHTML =
+    "<tr><th>#</th><th>lane</th><th>account</th><th>dataset</th><th>old sharpe</th><th>new sharpe</th><th>fitness</th><th>TO</th><th>PP corr</th><th>Power Pool verdict</th><th>expression / error</th></tr>" +
+    rs.map(r => `<tr><td>${r.candidate_id}</td><td>${esc(r.lane || "-")}${r.purpose ? `<div class="mute">${esc(r.purpose)}</div>` : ""}</td><td>${esc(r.account)}</td><td>${esc(ds(r.datasets))}</td>
+      <td>${num(r.old_sharpe)}</td><td><b>${num(r.sharpe)}</b></td><td>${num(r.fitness)}</td><td>${num(r.turnover)}</td>
+      <td>${num(r.pp_corr)}</td><td>${verdict(r)}</td>
+      <td><code>${esc(r.expr)}</code>${r.alpha_id ? `<div class="mute">alpha ${esc(r.alpha_id)}</div>` : ""}
+      ${r.error ? `<div class="bad">${esc(r.error.replace(/<[^>]+>/g, ""))}</div>` : ""}</td></tr>`).join("");
+
+  const pickPill = {approved: "ok", proposed: "run", rejected: "bad", submitted: "ok"};
+  const openDesc = new Set([...document.querySelectorAll("#picks details[open]")].map(d => d.dataset.id));
+  document.getElementById("picks").innerHTML = s.picks.length
+    ? "<tr><th>status</th><th>alpha</th><th>dataset</th><th>sharpe</th><th>fitness</th><th>TO</th><th>max corr</th><th>folded in</th><th>expression and description</th><th></th></tr>" +
+      s.picks.map(p => {
+        const members = JSON.parse(p.members || "[]");
+        return `<tr><td><span class="pill ${pickPill[p.status] || "mute"}">${esc(p.status)}</span></td>
+          <td>${esc(p.alpha_id)}<div class="mute">#${p.candidate_id} · ${esc(p.account)}</div></td>
+          <td>${esc(ds(p.datasets))}${p.single_dataset ? '<div class="mute">single dataset (ATOM)</div>' : ""}</td>
+          <td><b>${num(p.sharpe)}</b></td><td>${num(p.fitness)}</td><td>${num(p.turnover)}</td>
+          <td>${num(p.max_corr)}<div class="mute">${esc(p.corr_with || "")}</div></td>
+          <td>${members.length}${members.length ? `<div class="mute">${members.map(m => `${esc(m[0])} (${num(m[1])})`).join("<br>")}</div>` : ""}</td>
+          <td><code>${esc(p.expr)}</code>${p.description
+              ? `<details data-id="${esc(p.alpha_id)}" ${openDesc.has(p.alpha_id) ? "open" : ""}><summary>description (${p.description.length} chars)</summary><pre>${esc(p.description)}</pre></details>`
+              : '<div class="mute">no description yet</div>'}</td>
+          <td style="white-space:nowrap">${p.status === "submitted" ? "" :
+              `<button data-pick="${esc(p.alpha_id)}" data-st="approved">Approve</button>
+               <button data-pick="${esc(p.alpha_id)}" data-st="rejected">Reject</button>
+               ${p.status !== "proposed" ? `<button data-pick="${esc(p.alpha_id)}" data-st="proposed">Reset</button>` : ""}`}</td></tr>`;
+      }).join("")
+    : '<tr><td class="mute">No pick list yet — run: python -m ppminer picklist --account &lt;name&gt;</td></tr>';
+  document.querySelectorAll("[data-pick]").forEach(b => b.onclick = async () => {
+    const r = await post("/api/pick/decide", {alpha_id: b.dataset.pick, status: b.dataset.st});
+    if (!r.ok) alert(r.error); tick();
+  });
+
+  document.getElementById("blocked").innerHTML = s.blocked.length
+    ? s.blocked.map(b => `<span class="pill bad">${esc(b.account)}: ${esc(b.field)}</span>`).join(" ")
+    : '<span class="mute">none yet</span>';
+
+  document.getElementById("described").innerHTML =
+    "<tr><th>#</th><th>dataset</th><th>ops</th><th>old sharpe</th><th>expression and description</th></tr>" +
+    s.described.map(d => `<tr><td>${d.candidate_id}</td><td>${esc(ds(d.datasets))}</td><td>${d.n_ops}</td><td>${num(d.sharpe)}</td>
+      <td><code>${esc(d.expr)}</code><details><summary>description (${d.text.length} chars)</summary><pre>${esc(d.text)}</pre></details></td></tr>`).join("");
+
+  document.getElementById("rewrites").innerHTML =
+    "<tr><th>parent</th><th>target</th><th>valid</th><th>expression</th></tr>" +
+    s.rewrites.map(w => `<tr><td>${w.parent_id}</td><td>${esc(w.target_category)}</td>
+      <td>${w.valid ? '<span class="ok">yes</span>' : `<span class="bad">no</span><div class="mute">${esc(w.problems)}</div>`}</td>
+      <td><code>${esc(w.expr)}</code></td></tr>`).join("");
+}
+tick(); setInterval(tick, 5000);
+
+const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-PP-Dashboard": "1"},
+                                        body: JSON.stringify(body || {})}).then(r => r.json());
+const msg = t => document.getElementById("loginmsg").textContent = t;
+
+async function loadAccounts(force) {
+  const s = await (await fetch("/api/login-status" + (force ? "?force" : ""))).json();
+  document.getElementById("accounts").innerHTML = s.accounts.length
+    ? s.accounts.map(a => `<span class="pill ${a.live ? "ok" : "bad"}">${esc(a.name)}: ${a.live ? `live, ${a.hours_left ?? "?"}h left` : "expired"}</span>`).join(" ")
+      + ` <span class="mute">checked ${esc(s.checked_at)}</span>`
+    : "No saved sessions yet.";
+  document.getElementById("profiles").innerHTML = s.profiles.map(p =>
+    `<button data-profile="${esc(p)}">Open BRAIN login · ${esc(p)}</button>`).join("");
+  document.querySelectorAll("[data-profile]").forEach(b => b.onclick = async () => {
+    const r = await post("/api/login/open", {profile: b.dataset.profile});
+    msg(r.ok ? `Opened Chrome '${b.dataset.profile}'. Log in + face scan, then click Save sessions.` : r.error);
+  });
+  const tg = document.getElementById("telegram");
+  tg.innerHTML = Array.isArray(s.telegram)
+    ? s.telegram.map(a => `<button data-tg="${esc(a)}">Send Telegram login · ${esc(a)}</button>`).join("")
+    : `<span class="mute">Telegram not set up: ${esc(s.telegram)}</span>`;
+  document.querySelectorAll("[data-tg]").forEach(b => b.onclick = async () => {
+    const r = await post("/api/login/telegram", {account: b.dataset.tg});
+    msg(r.ok ? `Face-scan link sent to ${b.dataset.tg}'s Telegram. Status updates when the scan is done.` : r.error);
+  });
+}
+document.getElementById("grab").onclick = async () => {
+  msg("Reading Chrome sessions… (allow the keychain prompt if it appears)");
+  const r = await post("/api/login/grab");
+  msg(r.ok ? (r.saved.length ? "Saved: " + r.saved.map(s => `${s.name} (${s.profile})`).join(", ") : "No live BRAIN session found in Chrome.") : r.error);
+  loadAccounts(true);
+};
+document.getElementById("refresh").onclick = () => loadAccounts(true);
+loadAccounts(false); setInterval(() => loadAccounts(false), 60000);
+</script>
+</body>
+</html>

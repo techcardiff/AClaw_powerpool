@@ -1,0 +1,233 @@
+"""Continuous miner: Lane A first, Lane C in spare capacity.
+
+  python -m ppminer run --account HT52122 --hours 8 --max-sims 300
+
+Each cycle:
+  1. Qwen revises explore ideas that showed some signal (revise.py)
+  2. build a batch: Lane A (PP inventory) + a share of Lane C (regular alphas,
+     incl. settings sweeps of near misses); Lane C fills whatever Lane A leaves
+  3. simulate the batch in parallel on BRAIN
+  4. recheck pending checks, rebuild the pick list, write descriptions for new picks
+  5. nothing left to simulate -> Qwen explores more fresh datasets
+When the session expires it waits for a new login (dashboard / cookie grab /
+Telegram) and carries on; unfinished jobs are put back, not lost.
+Nothing is ever submitted by the runner.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from . import cookies as ck
+from . import lanes, revise
+from .brain import AuthRequired, Brain, settings_for, summarize
+from .catalog import Catalog
+from .fields import block
+from .pp import submit_expr
+from .verdict import regular_verdict, verdict
+
+LOGIN_POLL_SECONDS = 300
+
+
+def log(msg: str) -> None:
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def _brain(account: str) -> Brain | None:
+    if account not in ck.saved_accounts():
+        return None
+    b = Brain.from_cookie(ck.load_cookie(account))
+    return b if b.is_authenticated() else None
+
+
+def _enqueue(conn, account, lane, purpose, cand_id, expr, settings, parent=None) -> int:
+    return conn.execute("""insert into resims(candidate_id, account, expr, settings, status, lane, purpose, parent_resim_id)
+                           values (?,?,?,?,'queued',?,?,?)""",
+                        (cand_id, account, expr, json.dumps(settings), lane, purpose, parent)).lastrowid
+
+
+def build_batch(conn, account: str, size: int, c_share: float) -> list[int]:
+    n_c = max(1, round(size * c_share))
+    rows_a = lanes.lane_a(conn, account, size - n_c)
+    ids = []
+    for r in rows_a:
+        purpose = {"explore": "explore", "rewrite": "rewrite"}.get(r["status"], "harvest")
+        ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
+    room = size - len(ids)
+    # Lane C part 1: settings sweeps for near misses (one parent per cycle)
+    for parent in lanes.near_misses(conn, account)[:1]:
+        _, fails = regular_verdict(parent["checks"])
+        for why, st in lanes.tune_variants(json.loads(parent["settings"]), fails, k=min(3, room)):
+            ids.append(_enqueue(conn, account, "C", f"tune: {why}", parent["candidate_id"], parent["expr"], st, parent["id"]))
+            room -= 1
+    # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
+    in_batch = {r["id"] for r in rows_a}
+    for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch)):
+        if room <= 0:
+            break
+        if r["id"] in in_batch:
+            continue
+        ids.append(_enqueue(conn, account, "C", "harvest-regular", r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
+        room -= 1
+    conn.commit()
+    return ids
+
+
+def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int) -> dict:
+    rows = {i: conn.execute("select * from resims where id=?", (i,)).fetchone() for i in ids}
+
+    def sim(i):
+        r = rows[i]
+        a = brain.simulate(r["expr"], json.loads(r["settings"]))
+        return summarize(a, brain.check(a["id"]))
+
+    stats = {"done": 0, "error": 0, "requeued": 0, "pp_ok": 0, "reg_ok": 0}
+    expired = False
+    with ThreadPoolExecutor(workers) as ex:
+        futs = {}
+        for i in ids:
+            conn.execute("update resims set status='running' where id=?", (i,))
+            futs[ex.submit(sim, i)] = i
+        conn.commit()
+        for fu in as_completed(futs):
+            i, r = futs[fu], rows[futs[fu]]
+            try:
+                s = fu.result()
+            except AuthRequired:
+                expired = True
+                conn.execute("delete from resims where id=?", (i,))     # retried after the next login
+                stats["requeued"] += 1
+                continue
+            except Exception as e:
+                msg = str(e)
+                conn.execute("update resims set status='error', error=? where id=?", (msg[:500], i))
+                if m := re.search(r"Invalid data field (\w+)", msg):
+                    block(conn, account, m.group(1), "BRAIN: invalid data field")
+                stats["error"] += 1
+                log(f"  [{r['lane']}] #{r['candidate_id']} error: {re.sub('<[^>]+>', '', msg)[:140]}")
+                continue
+            conn.execute("""update resims set alpha_id=?, sharpe=?, fitness=?, turnover=?, returns=?, drawdown=?,
+                            checks=?, pp_corr=?, status='done' where id=?""",
+                         (s["alpha_id"], s["sharpe"], s["fitness"], s["turnover"], s["returns"], s["drawdown"],
+                          json.dumps(s.get("checks")), s.get("pp_corr"), i))
+            chk = json.dumps(s.get("checks"))
+            pv, rv = verdict(s["sharpe"], chk)[0], regular_verdict(chk)[0]
+            stats["done"] += 1
+            stats["pp_ok"] += pv == "pp_ok"
+            stats["reg_ok"] += rv == "reg_ok"
+            log(f"  [{r['lane']}] #{r['candidate_id']} {s['alpha_id']} sh={s['sharpe']} to={s['turnover']} "
+                f"PP={pv} REG={rv} ({r['purpose']})")
+    conn.commit()
+    stats["expired"] = expired
+    return stats
+
+
+def do_revisions(conn, catalog, account: str, limit: int, workers: int = 4) -> int:
+    rows = revise.todo(conn, account)[:limit]
+    added = 0
+    with ThreadPoolExecutor(workers) as ex:
+        futs = {ex.submit(revise.revise, _ro(conn), catalog, account, r): r for r in rows}
+        for fu in as_completed(futs):
+            r = futs[fu]
+            try:
+                revs = fu.result()
+            except Exception as e:
+                revise.mark(conn, r["id"], False, f"error: {e}")
+                continue
+            n = revise.save(conn, catalog, r, revs)
+            revise.mark(conn, r["id"], n > 0, f"{n} revisions kept of {len(revs)}" if revs else "dropped: no signal")
+            added += n
+    return added
+
+
+def _ro(conn):
+    path = conn.execute("pragma database_list").fetchone()[2]
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def after_batch(conn, catalog, brain: Brain, account: str) -> int:
+    """Recheck pending PP checks, rebuild picks, describe new picks. Returns number of picks."""
+    from .describe import describe, save as save_desc
+    from .picks import build, fetch_pnl, passing
+    for r in conn.execute("select * from resims where account=? and status='done' and lane is not null", (account,)).fetchall():
+        if verdict(r["sharpe"], r["checks"])[0] == "pending":
+            s = summarize(brain.alpha(r["alpha_id"]), brain.check(r["alpha_id"]))
+            conn.execute("update resims set checks=? where id=?", (json.dumps(s.get("checks")), r["id"]))
+    conn.commit()
+    rows = passing(conn, account)
+    fetch_pnl(conn, brain, account, [r["alpha_id"] for r in rows])
+    picks = build(conn, account)
+    for p in picks:
+        cid = p["row"]["candidate_id"]
+        if conn.execute("select 1 from descriptions where candidate_id=?", (cid,)).fetchone():
+            continue
+        try:
+            save_desc(conn, cid, describe(conn.execute("select * from candidates where id=?", (cid,)).fetchone(), catalog))
+        except Exception as e:
+            log(f"  describe #{cid} failed: {e}")
+    return len(picks)
+
+
+def run(db_path: str, catalog_dir: str, account: str, hours: float, max_sims: int, batch: int = 8,
+        workers: int = 4, c_share: float = 0.25, explore_limit: int = 5) -> None:
+    from .db import connect
+    from .explore import explore, fresh_datasets, save as save_explore
+    conn = connect(db_path)
+    lanes.migrate(conn)
+    catalog = Catalog(catalog_dir)
+    catalog.add_account_fields(conn, account)
+    conn.execute("delete from resims where account=? and status in ('queued','running')", (account,))  # stale from a crash
+    conn.commit()
+    t_end, sims, synced = time.time() + hours * 3600, 0, False
+    log(f"runner start: account {account}, {hours}h, max {max_sims} sims, batch {batch}, Lane C share {c_share}")
+    while time.time() < t_end and sims < max_sims:
+        brain = _brain(account)
+        if brain is None:
+            lanes.set_state(conn, status="waiting_login", account=account, sims=sims)
+            log(f"session for {account} not live - waiting for a new login (checking every {LOGIN_POLL_SECONDS // 60} min)")
+            time.sleep(LOGIN_POLL_SECONDS)
+            continue
+        if not synced:
+            log(f"synced {lanes.sync_submitted(conn, brain, account, catalog)} submitted alphas of {account}")
+            synced = True
+        added = do_revisions(conn, catalog, account, limit=8)
+        if added:
+            log(f"Qwen revisions: {added} new explore variants")
+        ids = build_batch(conn, account, min(batch, max_sims - sims), c_share)
+        if not ids:
+            fresh = fresh_datasets(conn, account)[:explore_limit]
+            if not fresh:
+                log("nothing left to simulate or explore - stopping")
+                break
+            n = 0
+            for ds in fresh:
+                try:
+                    n += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds))
+                except Exception as e:
+                    log(f"  explore {ds['dataset']} failed: {e}")
+            log(f"queues empty - Qwen explored {len(fresh)} fresh datasets, {n} new ideas")
+            continue
+        lanes.set_state(conn, status="simulating", account=account, sims=sims, batch=len(ids))
+        log(f"batch of {len(ids)}: " + ", ".join(f"{k}={v}" for k, v in _lane_counts(conn, ids).items()))
+        st = run_jobs(conn, brain, account, ids, workers)
+        sims += st["done"] + st["error"]
+        if st["expired"]:
+            continue
+        n_picks = after_batch(conn, catalog, brain, account)
+        lanes.set_state(conn, status="idle", account=account, sims=sims, last_batch=st, picks=n_picks)
+        log(f"batch done: {st} | sims so far {sims} | picks {n_picks}")
+    lanes.set_state(conn, status="stopped", account=account, sims=sims)
+    log(f"runner stopped after {sims} simulations")
+
+
+def _lane_counts(conn, ids):
+    out = {}
+    for i in ids:
+        lane = conn.execute("select lane from resims where id=?", (i,)).fetchone()[0]
+        out[f"lane {lane}"] = out.get(f"lane {lane}", 0) + 1
+    return out

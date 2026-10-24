@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Everything under data/ stays local: live BRAIN session cookies and Telegram
+# credentials (data/secrets), the alpha database, BRAIN field catalogs, reports
+# with alpha IDs/expressions, and logs.
+data/
+*.cookie
+*.log
+
+# WorldQuant consultant documents
+ref/
+
+.DS_Store

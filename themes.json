@@ -1,0 +1,14 @@
+[
+  {
+    "name": "D1 Power Pool Oct`26 (pv/fundamental)",
+    "start": "2026-09-28",
+    "end": "2026-10-11",
+    "rule": "delay=1 & datacategory in ['pv', 'fundamental'] & single datacategory"
+  },
+  {
+    "name": "D1 Power Pool Oct`26 (analyst/model/news)",
+    "start": "2026-10-12",
+    "end": "2026-10-25",
+    "rule": "delay=1 & datacategory in ['analyst', 'model', 'news'] & single datacategory"
+  }
+]

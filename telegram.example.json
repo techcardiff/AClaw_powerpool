@@ -1,0 +1,21 @@
+{
+  "bot_token": "123456:ABC-from-BotFather",
+  "admin_chat_ids": [111111111],
+  "auto_prompt": true,
+  "renew_before_minutes": 30,
+  "quiet_hours": [0, 7],
+  "scan_wait_minutes": 10,
+  "retry_after_minutes": 60,
+  "accounts": {
+    "HT52122": {
+      "chat_id": 111111111,
+      "email": "owner-of-HT52122@example.com",
+      "password": "set-by-the-account-owner"
+    },
+    "friend": {
+      "chat_id": 222222222,
+      "email": "friend@example.com",
+      "password": "set-by-the-account-owner"
+    }
+  }
+}
