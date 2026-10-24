@@ -51,7 +51,9 @@ That is "Lane C" below.
  picks + descriptions (Qwen) ──► dashboard ──► human approves ──► submit
 ```
 
-**Nothing is ever submitted automatically.** A person approves each submission.
+**Only the daily scheduler submits** (`ppminer daily` → `autosubmit.py`), within each account's quota and
+only after a fresh BRAIN check and a verified description. It runs in **dry-run mode** per account until
+switched on in `data/autosubmit.json`. No person or session submits by hand.
 
 Qwen3.8-27B (on the A6000) does the language work: rewriting mixed-category alphas into
 one category (`purify.py`), proposing alphas on new datasets (`explore.py`), revising
@@ -63,7 +65,7 @@ ideas after seeing their results (`revise.py`), and writing descriptions (`descr
 
 | Part | Where | Notes |
 |---|---|---|
-| Miner jobs, dashboard, `data/pp.db`, session cookies | **3080 server**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux session `ppminer` (windows `qwen-tunnel`, `web`), started by `scripts/start_3080.sh`. The @reboot cron entry (`scripts/install_3080_cron.sh`) is **not installed yet**, so after a 3080 restart run `scripts/start_3080.sh` by hand |
+| Miner jobs, dashboard, `data/pp.db`, session cookies | **3080 server**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux session `ppminer` (windows `qwen-tunnel`, `web`, `daily` = scheduler), started by `scripts/start_3080.sh` (safe to re-run; restart one service with `tmux kill-window -t ppminer:<name>` then the script, never `pkill -f`). The @reboot cron entry (`scripts/install_3080_cron.sh`) is **not installed yet**, so after a 3080 restart run `scripts/start_3080.sh` by hand |
 | Qwen3.8-27B (vLLM) | **A6000 server**, port 8060, reached through a tunnel on 127.0.0.1:18060 | The vLLM process belongs to **another lab user**; if they stop it, all Qwen steps fail until it's back. Simulations still work. |
 | Telegram login broker | **Mac** (`scripts/start_mac_broker.sh`) | Telegram is blocked from the cluster. New session cookies are copied to the 3080. |
 | Code | GitHub `techcardiff/AClaw_powerpool` | `data/` and `ref/` are git-ignored on purpose |
@@ -100,7 +102,12 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 | `cookies.py` | Session cookies: read from Chrome, save per account (mode 600) | |
 | `telegram.py` | Telegram broker that sends the face-scan link to each account owner | |
 | `llm.py` | Qwen client (OpenAI-compatible, JSON schema, thinking off by default) | switching models |
-| `web.py`, `web.html` | Dashboard (read-only view + login and pick approval buttons) | UI work |
+| `quota.py` | Power Pool quota calendar per account, in New York days | BRAIN changes the quota rules |
+| `descheck.py` | Description verifier: window/field rules + Qwen audit; one rewrite, else skip | descriptions get through that shouldn't |
+| `autosubmit.py` | **The only submitter**: quota, fresh check, `min_sharpe`, verified description, submit, log | submission policy |
+| `scheduler.py` | `ppminer daily`: auto-submit after midnight New York, mining cycles for every account in between | scheduling |
+| `markets.py` | Per-region universe and neutralization (EUR, ASI, …) | adding a market |
+| `web.py`, `web.html` | Dashboard (read-only view, login and pick buttons, auto-submit log) | UI work |
 | `db.py` | Main schema; `lanes.migrate()` adds the newer columns/tables | schema changes |
 | `__main__.py` | CLI | adding a command |
 
@@ -140,11 +147,12 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 1. **Never commit `data/`.** It holds live BRAIN session cookies, account passwords for
    the Telegram broker, and our research. `.gitignore` covers it; check `git status` before committing.
-2. **Never submit or tag alphas yourself** unless the account owner asked you to. Submissions are
-   permanent and stay in the account's correlation pool even if untagged later.
+2. **Never submit or tag alphas yourself.** Only the scheduler submits; change its behaviour in code,
+   reviewed, not by hand. Submissions are permanent and stay in the account's correlation pool even if
+   untagged later. Switching an account from dry run to real submissions is the account owner's decision.
 3. **One submitter at a time.** On 24 Oct two sessions submitted to the same account within two
    minutes of each other, each unaware of the other, and it took time to work out who submitted
-   what. Agree who submits before anyone does.
+   what. That is why the scheduler is now the single submitter (with a file lock).
 4. **One writer per `pp.db`.** Run one job per account at a time; never run jobs against the old
    Mac snapshot `data/pp.db.moved-to-3080`.
 5. **Keep accounts separate.** Each consultant account's alphas must be its own research. Don't
@@ -180,18 +188,19 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 ## 8. Open work, roughly in priority order
 
-1. **Tag test:** check whether tagging an already-submitted regular alpha as `PowerPoolSelected` is
+1. **Notifications:** relay the auto-submit log through the Mac Telegram broker.
+2. **Tag test:** check whether tagging an already-submitted regular alpha as `PowerPoolSelected` is
    accepted and whether it uses a daily slot (could add strong Power Pool + Regular alphas without
    using the quota). Prepared, not run.
-2. **Measure the explore revise loop:** does Sharpe improve over rounds? Tune `FLIP_AT` / `DROP_BELOW`
+3. **Measure the explore revise loop:** does Sharpe improve over rounds? Tune `FLIP_AT` / `DROP_BELOW`
    and the prompt in `revise.py`.
-3. **Pre-simulation filtering:** learn which families fold into an account's existing Power Pool
+4. **Pre-simulation filtering:** learn which families fold into an account's existing Power Pool
    and stop spending simulations on them (`lanes.collide_stems` is a first version).
-4. **Theme lane for after week 6:** build a stock of theme-matching alphas before quotas require it
+5. **Theme lane for after week 6** (the scheduler already requires a theme match then, so it needs supply): build a stock of theme-matching alphas before quotas require it
    (early December for both accounts).
-5. **Unit tests** for `verdict.py`, `select.py` and `picks.py`, using saved `/check` JSON.
-6. **Dashboard:** filter by account, show Lane C near misses with their tried settings.
-7. Self-hosting Qwen under our own Linux user, so we don't depend on another lab member's process.
+6. **Unit tests** for `verdict.py`, `select.py` and `picks.py`, using saved `/check` JSON.
+7. **Dashboard:** filter by account, show Lane C near misses with their tried settings.
+8. Self-hosting Qwen under our own Linux user, so we don't depend on another lab member's process.
 
 ---
 
@@ -200,6 +209,9 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 - Accounts: **HT52122** and **YO50689**, each in week 1 of Power Pool. Both have Power Pool alphas
   submitted; see the dashboard's pick list for which.
 - The miner and its database live on the 3080; the Telegram broker runs on the Mac.
-- No submissions should be made until the team confirms who is the single submitter.
+- The `daily` scheduler is the single submitter; it was deployed in dry-run mode on 24 Oct, with
+  `min_sharpe` 1.15. EUR and ASI field syncs were started the same day.
+- The @reboot cron entry is not installed: after a 3080 restart run `scripts/start_3080.sh`.
+- There are no notifications from the 3080 (Telegram is blocked there): check the dashboard's auto-submit log.
 
 Questions: ask your supervisor, who has the history of this project.
