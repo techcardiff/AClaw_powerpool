@@ -39,8 +39,12 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8,
     from .db import connect
     conn = connect(db_path)
     lanes.migrate(conn)
+    # jobs left 'queued'/'running' by a previous scheduler process can never finish
+    # (the process that would record them is gone); free their candidates
+    n = conn.execute("delete from resims where status in ('queued','running')").rowcount
+    conn.commit()
     t_end = time.time() + hours * 3600
-    log("daily scheduler start")
+    log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
     while time.time() < t_end:
         cfg = autosubmit.load_config()
         accounts = [a for a, c in cfg.get("accounts", {}).items() if c.get("enabled")]
