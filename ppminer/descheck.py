@@ -50,7 +50,8 @@ def rule_issues(expr: str, text: str) -> list[str]:
     for s in SECTIONS:
         if s not in text:
             issues.append(f"missing section '{s}'")
-    numbers = set(re.findall(r"\b\d+\b", expr))
+    # digits anywhere count: horizons are often part of field names (implied_volatility_call_120)
+    numbers = set(re.findall(r"\d+", expr))
     for w in _WINDOW.findall(text):
         if w not in numbers:
             issues.append(f"mentions a {w}-day window that is not in the expression")

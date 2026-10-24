@@ -77,3 +77,11 @@ def test_atom_verdict():
     assert atom_verdict(ok, False)[0] == "not_atom"
     assert atom_verdict(chk(LOW_FITNESS="FAIL"), True) == ("not_atom", ["LOW_FITNESS"])
     assert atom_verdict(chk(SELF_CORRELATION="PENDING"), True)[0] == "pending"
+
+
+def test_description_window_inside_field_name():
+    from ppminer.descheck import rule_issues
+    expr = "ts_mean(implied_volatility_call_120 / implied_volatility_put_120, 60)"
+    text = ("Idea: 120-day implied volatility skew. Rationale for data used: implied_volatility_call_120 and "
+            "implied_volatility_put_120. Rationale for operators used: a 60-day mean.")
+    assert rule_issues(expr, text) == []
