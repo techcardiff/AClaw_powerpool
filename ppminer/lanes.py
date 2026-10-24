@@ -13,10 +13,11 @@ submitted alphas (self-correlation).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 from .brain import BASE, Brain
-from .expr import analyze
+from .expr import GROUPING_FIELDS, analyze
 from .harvest import SUSPICIOUS_SHARPE
 from .select import _stems, shortlist
 from .verdict import regular_verdict, verdict
@@ -51,6 +52,31 @@ def set_state(conn: sqlite3.Connection, **kv) -> None:
 
 
 # ── what the account already has ────────────────────────────────────────────
+def field_stems(expr: str, catalog, region: str | None) -> str:
+    """Field-family signature of a submitted expression. Comments are stripped
+    (old studio alphas carry /* HYPOTHESIS ... */ blocks the parser rejects) and
+    grouping fields (industry, subindustry, ...) are not data fields."""
+    clean = re.sub(r"/\*.*?\*/", " ", expr, flags=re.S)
+    clean = re.sub(r"(#|//)[^\n]*", " ", clean)
+    s = analyze(clean)
+    if s.ok:
+        names = s.names
+    else:   # still unparseable: fall back to plain identifiers
+        names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", clean)) - set(re.findall(r"([A-Za-z_]\w*)\s*\(", clean))
+    return _stems(sorted(x for x in names if x not in GROUPING_FIELDS and catalog.get(x, region)))
+
+
+def restem(conn: sqlite3.Connection, catalog) -> int:
+    """Recompute stored field families (after a change to field_stems)."""
+    rows = conn.execute("select account, alpha_id, expr from account_submitted").fetchall()
+    for acct, aid, expr in rows:
+        conn.execute("update account_submitted set stems=? where account=? and alpha_id=?",
+                     (field_stems(expr, catalog, "USA"), acct, aid))
+    conn.commit()
+    return len(rows)
+
+
+
 def sync_submitted(conn: sqlite3.Connection, brain: Brain, account: str, catalog) -> int:
     migrate(conn)
     off, n = 0, 0
@@ -58,12 +84,10 @@ def sync_submitted(conn: sqlite3.Connection, brain: Brain, account: str, catalog
         j = brain._req("GET", f"{BASE}/users/self/alphas", params={"limit": 100, "offset": off, "status": "ACTIVE"}).json()
         for a in j.get("results", []):
             expr = (a.get("regular") or {}).get("code") or ""
-            s = analyze(expr)
             region = (a.get("settings") or {}).get("region")
-            fields = sorted(x for x in s.names if catalog.get(x, region)) if s.ok else []
             conn.execute("""insert or replace into account_submitted values (?,?,?,?,?,?,?,?)""",
-                         (account, a["id"], expr, expr.replace(" ", ""), _stems(fields), json.dumps(a.get("tags")),
-                          (a.get("is") or {}).get("sharpe"), a.get("dateSubmitted")))
+                         (account, a["id"], expr, expr.replace(" ", ""), field_stems(expr, catalog, region),
+                          json.dumps(a.get("tags")), (a.get("is") or {}).get("sharpe"), a.get("dateSubmitted")))
             n += 1
         off += 100
         if off >= j.get("count", 0):
@@ -100,24 +124,51 @@ def submitted_exprs(conn: sqlite3.Connection, account: str) -> set[str]:
 LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore")
 
 
-def lane_a(conn: sqlite3.Connection, account: str, n: int) -> list[sqlite3.Row]:
+def other_accounts(conn: sqlite3.Connection, account: str, others: list[str]) -> tuple[set[int], set[str], set[str]]:
+    """What other accounts already used: candidate ids they simulated, field families they
+    simulated or submitted, and their submitted expressions. Each consultant account's
+    alphas must be its own research, so lanes never hand these to `account`."""
+    ids, stems, exprs = set(), set(), set()
+    for o in others:
+        if o == account:
+            continue
+        for cid, fields in conn.execute("""select r.candidate_id, c.fields from resims r join candidates c
+                                           on c.id = r.candidate_id where r.account=?""", (o,)):
+            ids.add(cid)
+            stems.add(_stems(json.loads(fields)))
+        stems |= {s for (s,) in conn.execute("select stems from account_submitted where account=?", (o,)) if s}
+        exprs |= submitted_exprs(conn, o)
+    return ids, stems, exprs
+
+
+def _without(rows, ids: set[int], n: int) -> list[sqlite3.Row]:
+    return [r for r in rows if r["id"] not in ids][:n]
+
+
+def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = ()) -> list[sqlite3.Row]:
     pp, _ = collide_stems(conn, account)
+    o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
     # exact copies of already-submitted alphas are better tagged into the Power Pool than re-simulated
-    return shortlist(conn, None, n=n, statuses=LANE_A_STATUSES, account=account, skip_done=True, exclude_stems=pp,
-                     exclude_exprs=submitted_exprs(conn, account), max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
+    rows = shortlist(conn, None, n=n * 3 if o_ids else n, statuses=LANE_A_STATUSES, account=account, skip_done=True,
+                     exclude_stems=pp | o_stems, exclude_exprs=submitted_exprs(conn, account) | o_exprs,
+                     max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
+    return _without(rows, o_ids, n)
 
 
 # ── Lane C ──────────────────────────────────────────────────────────────────
 REGULAR_SHARPE, REGULAR_FITNESS = 1.58, 1.0
 
 
-def lane_c(conn: sqlite3.Connection, account: str, n: int) -> list[sqlite3.Row]:
+def lane_c(conn: sqlite3.Connection, account: str, n: int, others: list[str] = ()) -> list[sqlite3.Row]:
     """Harvested alphas that already looked regular-grade in old sims (any shape)."""
     _, own = collide_stems(conn, account)
+    o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
     statuses = ("pp_ready", "pp_multi", "purify", "rewrite")
-    return shortlist(conn, None, n=n, statuses=statuses, account=account, skip_done=True, exclude_stems=own,
-                     exclude_exprs=submitted_exprs(conn, account), min_sharpe=REGULAR_SHARPE, min_fitness=REGULAR_FITNESS,
+    rows = shortlist(conn, None, n=n * 3 if o_ids else n, statuses=statuses, account=account, skip_done=True,
+                     exclude_stems=own | o_stems, exclude_exprs=submitted_exprs(conn, account) | o_exprs,
+                     min_sharpe=REGULAR_SHARPE, min_fitness=REGULAR_FITNESS,
                      max_per_dataset=3, max_per_shape=2, max_sharpe=SUSPICIOUS_SHARPE)
+    return _without(rows, o_ids, n)
 
 
 def tune_variants(settings: dict, fails: list[str], k: int = 4) -> list[tuple[str, dict]]:

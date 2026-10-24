@@ -56,3 +56,24 @@ def test_lint_vector_and_identical_pairs():
 
 def test_lint_scientific_notation():
     assert lint("x / (y + 1e-8)", lambda n: False) == ["scientific notation 1e-8 (BRAIN rejects it; write 0.00000001)"]
+
+
+def test_description_rules():
+    from ppminer.descheck import rule_issues
+    expr = "ts_rank(divide(anl4_x_mean, vwap), 252)"
+    good = "Idea: x. Rationale for data used: anl4_x_mean over vwap. Rationale for operators used: a 252-day rank." + " " * 20
+    assert rule_issues(expr, good) == []
+    bad = good.replace("252-day", "60-day").replace("anl4_x_mean", "anl4_other_field")
+    issues = rule_issues(expr, bad)
+    assert any("60-day" in i for i in issues) and any("anl4_other_field" in i for i in issues)
+
+
+def test_atom_verdict():
+    import json
+    from ppminer.verdict import atom_verdict
+    chk = lambda **kw: json.dumps([{"name": k, "result": v} for k, v in kw.items()])
+    ok = chk(LOW_SHARPE="PASS", IS_LADDER_SHARPE="FAIL", SELF_CORRELATION="PASS", REGULAR_SUBMISSION="FAIL")
+    assert atom_verdict(ok, True) == ("atom_ok", [])
+    assert atom_verdict(ok, False)[0] == "not_atom"
+    assert atom_verdict(chk(LOW_FITNESS="FAIL"), True) == ("not_atom", ["LOW_FITNESS"])
+    assert atom_verdict(chk(SELF_CORRELATION="PENDING"), True)[0] == "pending"

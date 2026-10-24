@@ -12,6 +12,8 @@ from urllib.parse import urljoin
 
 import requests
 
+from . import markets
+
 BASE = "https://api.worldquantbrain.com"
 
 
@@ -102,6 +104,15 @@ class Brain:
         r = self.s.post(f"{BASE}/alphas/{alpha_id}/submit", timeout=60)
         if r.status_code == 401:
             raise AuthRequired("session expired")
+        if r.status_code == 403 and "ALREADY_SUBMITTED" in r.text:
+            # an earlier attempt got through (the alpha can take a moment to show ACTIVE)
+            for _ in range(12):
+                a = self.alpha(alpha_id)
+                if a.get("status") == "ACTIVE":
+                    break
+                time.sleep(10)
+            return {"http": r.status_code, "body": {}, "submitted": a.get("status") == "ACTIVE", "status": a.get("status"),
+                    "stage": a.get("stage"), "tags": a.get("tags"), "dateSubmitted": a.get("dateSubmitted")}
         if r.status_code >= 400:
             raise RuntimeError(f"submit refused: HTTP {r.status_code} {r.text[:300]}")
         deadline = time.time() + max_wait
@@ -121,7 +132,7 @@ def settings_for(row, *, universe: str | None = None) -> dict:
     return {
         "instrumentType": "EQUITY",
         "region": row["region"] or "USA",
-        "universe": universe or row["universe"] or "TOP3000",
+        "universe": universe or row["universe"] or markets.universe(row["region"]),
         "delay": row["delay"] if row["delay"] is not None else 1,
         "decay": row["decay"] if row["decay"] is not None else 6,
         "neutralization": row["neutralization"] or "SUBINDUSTRY",

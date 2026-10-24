@@ -64,6 +64,10 @@
     <div class="scroll"><table id="picks"></table></div>
   </section>
   <section>
+    <h2>Auto-submit log (only the scheduler submits)</h2>
+    <div class="scroll"><table id="autosubmit"></table></div>
+  </section>
+  <section>
     <h2>Lane C — regular alpha candidates</h2>
     <div class="mute" style="padding:8px 14px 0">Regular bar: every check PASS (sharpe ≥ 1.58, fitness ≥ 1.0, self-correlation &lt; 0.7 …).
       "near" = only tunable checks fail; the runner tries settings variants for these.</div>
@@ -114,6 +118,14 @@ async function tick() {
   document.getElementById("tiles").innerHTML = tiles.map(([k, v]) => `<div class="tile"><span class="mute">${k}</span><b>${v ?? 0}</b></div>`).join("");
 
   const regPill = {reg_ok: ["ok", "regular ready"], near: ["warn", "near"], pending: ["run", "checks pending"]};
+  const actPill = {submitted: "ok", dry_run: "run", skip: "warn", submit_failed: "bad", stop: "warn", waiting_login: "warn", quota: "mute"};
+  document.getElementById("autosubmit").innerHTML = (s.autosubmit || []).length
+    ? "<tr><th>time (UTC)</th><th>account</th><th>NY day</th><th>action</th><th>alpha</th><th>detail</th></tr>" +
+      s.autosubmit.map(e => `<tr><td>${esc(e.ts)}</td><td>${esc(e.account)}</td><td>${esc(e.ny_date)}</td>
+        <td><span class="pill ${actPill[e.action] || "mute"}">${esc(e.action)}</span></td><td>${esc(e.alpha_id || "")}</td>
+        <td class="mute">${esc(e.detail || "")}</td></tr>`).join("")
+    : '<tr><td class="mute">No auto-submit runs yet.</td></tr>';
+
   document.getElementById("regular").innerHTML = s.regular.length
     ? "<tr><th>alpha</th><th>lane</th><th>dataset</th><th>sharpe</th><th>fitness</th><th>TO</th><th>status</th><th>expression</th></tr>" +
       s.regular.map(r => `<tr><td>${esc(r.alpha_id)}<div class="mute">#${r.candidate_id} · ${esc(r.account)}</div></td>

@@ -63,6 +63,11 @@ def snapshot(db_path: str) -> dict:
         out["runner"]["updated_at"] = conn.execute("select max(updated_at) from runner_state").fetchone()[0]
     except sqlite3.OperationalError:
         out["runner"] = {}
+    try:   # written by `autosubmit` / `daily`
+        out["autosubmit"] = _rows(conn, """select ts, account, ny_date, alpha_id, action, detail from autosubmit_log
+                                           order by id desc limit 60""")
+    except sqlite3.OperationalError:
+        out["autosubmit"] = []
     conn.close()
     out["regular"] = []
     for r in out["resims"]:
@@ -123,7 +128,10 @@ _broker = None
 
 def telegram_accounts() -> list[str] | str:
     """Accounts set up for Telegram login, or the reason it isn't set up."""
-    from .telegram import ConfigError, load_config
+    from .telegram import CONFIG, ConfigError, load_config
+    if not os.path.exists(CONFIG) and os.getenv("PP_BROKER_ELSEWHERE"):
+        return ("the Telegram broker runs on the Mac (Telegram is blocked from this server). "
+                "Send /login to the bot, or /status to see sessions.")
     try:
         return list(load_config()["accounts"])
     except ConfigError as e:

@@ -45,7 +45,23 @@ def save_cookie(account: str, cookie: str) -> str:
     with os.fdopen(fd, "w") as f:
         f.write(cookie.strip())
     os.chmod(path, 0o600)
+    sync_cookie(path)
     return path
+
+
+def sync_cookie(path: str) -> bool:
+    """Copy a saved cookie to the machine running the jobs (PP_COOKIE_SYNC, e.g.
+    'qa-3080:/data/aclaw_powerpool/data/secrets/'). The Telegram broker runs on the
+    Mac because Telegram is blocked from the cluster; the jobs there need the cookie."""
+    target = os.getenv("PP_COOKIE_SYNC")
+    if not target:
+        return False
+    p = subprocess.run(["scp", "-q", "-p", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", path, target],
+                       capture_output=True, text=True, timeout=60)
+    if p.returncode != 0:
+        print(f"cookie sync to {target} failed: {p.stderr.strip()[:200]}")
+        return False
+    return True
 
 
 def load_cookie(account: str) -> str:

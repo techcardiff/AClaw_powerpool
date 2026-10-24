@@ -10,6 +10,7 @@ import sqlite3
 
 from .catalog import Catalog
 from .llm import LLM_MODEL, chat_json
+from . import markets
 from .pp import check
 
 SYSTEM = """You are a senior WorldQuant BRAIN researcher creating simple, robust Power Pool alphas
@@ -103,8 +104,8 @@ def save(conn: sqlite3.Connection, ds: sqlite3.Row, results: list[dict], region:
             """insert or ignore into candidates(key, expr, region, delay, universe, neutralization, decay, truncation,
                    n_ops, n_fields, fields, categories, datasets, single_category, single_dataset, problems,
                    n_seen, sources, reasoning, family, flags, status)
-               values (?,?,?,?,'TOP3000','SUBINDUSTRY',4,0.08,?,?,?,?,?,1,1,'[]',1,?,?,?,'[]','explore')""",
-            (f"{region}|{delay}|{chk.canonical}", r["expr"], region, delay, chk.n_ops, len(chk.fields),
+               values (?,?,?,?,?,?,4,0.08,?,?,?,?,?,1,1,'[]',1,?,?,?,'[]','explore')""",
+            (f"{region}|{delay}|{chk.canonical}", r["expr"], region, delay, markets.universe(region), markets.neutralization(region), chk.n_ops, len(chk.fields),
              json.dumps(chk.fields), json.dumps(chk.categories), json.dumps(chk.datasets),
              json.dumps([f"explore:{ds['dataset']}:{LLM_MODEL}"]), r["idea"],
              f"{region}|{delay}|" + ",".join(sorted(chk.fields))))

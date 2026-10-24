@@ -49,9 +49,9 @@ def _enqueue(conn, account, lane, purpose, cand_id, expr, settings, parent=None)
                         (cand_id, account, expr, json.dumps(settings), lane, purpose, parent)).lastrowid
 
 
-def build_batch(conn, account: str, size: int, c_share: float) -> list[int]:
+def build_batch(conn, account: str, size: int, c_share: float, others: list[str] = ()) -> list[int]:
     n_c = max(1, round(size * c_share))
-    rows_a = lanes.lane_a(conn, account, size - n_c)
+    rows_a = lanes.lane_a(conn, account, size - n_c, others)
     ids = []
     for r in rows_a:
         purpose = {"explore": "explore", "rewrite": "rewrite"}.get(r["status"], "harvest")
@@ -65,7 +65,7 @@ def build_batch(conn, account: str, size: int, c_share: float) -> list[int]:
             room -= 1
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
     in_batch = {r["id"] for r in rows_a}
-    for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch)):
+    for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch), others):
         if room <= 0:
             break
         if r["id"] in in_batch:
@@ -106,6 +106,7 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int) -> 
                 conn.execute("update resims set status='error', error=? where id=?", (msg[:500], i))
                 if m := re.search(r"Invalid data field (\w+)", msg):
                     block(conn, account, m.group(1), "BRAIN: invalid data field")
+                conn.commit()
                 stats["error"] += 1
                 log(f"  [{r['lane']}] #{r['candidate_id']} error: {re.sub('<[^>]+>', '', msg)[:140]}")
                 continue
@@ -113,6 +114,7 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int) -> 
                             checks=?, pp_corr=?, status='done' where id=?""",
                          (s["alpha_id"], s["sharpe"], s["fitness"], s["turnover"], s["returns"], s["drawdown"],
                           json.dumps(s.get("checks")), s.get("pp_corr"), i))
+            conn.commit()                # save each result as it lands; an interrupted batch keeps its finished sims
             chk = json.dumps(s.get("checks"))
             pv, rv = verdict(s["sharpe"], chk)[0], regular_verdict(chk)[0]
             stats["done"] += 1
@@ -173,10 +175,54 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     return len(picks)
 
 
-def run(db_path: str, catalog_dir: str, account: str, hours: float, max_sims: int, batch: int = 8,
-        workers: int = 4, c_share: float = 0.25, explore_limit: int = 5) -> None:
-    from .db import connect
+def explore_regions(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10) -> int:
+    """Keep a small stock of unsimulated explore ideas in every region the account has synced."""
     from .explore import explore, fresh_datasets, save as save_explore
+    added = 0
+    for region in regions:
+        queued = conn.execute("""select count(*) from candidates c where c.status='explore' and c.region=?
+                                 and not exists (select 1 from resims r where r.candidate_id=c.id and r.account=?)""",
+                              (region, account)).fetchone()[0]
+        if queued >= min_queue:
+            continue
+        for ds in fresh_datasets(conn, account, region)[:per_region]:
+            try:
+                added += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds, region), region)
+            except Exception as e:
+                log(f"  explore {region}/{ds['dataset']} failed: {e}")
+    return added
+
+
+def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.25,
+          regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9) -> dict:
+    """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
+    brain = _brain(account)
+    if brain is None:
+        lanes.set_state(conn, status="waiting_login", account=account)
+        return {"status": "waiting_login", "sims": 0}
+    added = do_revisions(conn, catalog, account, limit=8)
+    if added:
+        log(f"[{account}] Qwen revisions: {added} new explore variants")
+    n = explore_regions(conn, catalog, account, list(regions))
+    if n:
+        log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
+    ids = build_batch(conn, account, min(batch, sims_left), c_share, others)
+    if not ids:
+        return {"status": "empty", "sims": 0}
+    lanes.set_state(conn, status="simulating", account=account, batch=len(ids))
+    log(f"[{account}] batch of {len(ids)}: " + ", ".join(f"{k}={v}" for k, v in _lane_counts(conn, ids).items()))
+    st = run_jobs(conn, brain, account, ids, workers)
+    if st["expired"]:
+        return {"status": "waiting_login", "sims": st["done"] + st["error"]}
+    n_picks = after_batch(conn, catalog, brain, account)
+    lanes.set_state(conn, status="idle", account=account, last_batch=st, picks=n_picks)
+    log(f"[{account}] batch done: {st} | picks {n_picks}")
+    return {"status": "ok", "sims": st["done"] + st["error"]}
+
+
+def run(db_path: str, catalog_dir: str, account: str, hours: float, max_sims: int, batch: int = 8,
+        workers: int = 4, c_share: float = 0.25, regions: list[str] = ("USA",), others: list[str] = ()) -> None:
+    from .db import connect
     conn = connect(db_path)
     lanes.migrate(conn)
     catalog = Catalog(catalog_dir)
@@ -184,43 +230,21 @@ def run(db_path: str, catalog_dir: str, account: str, hours: float, max_sims: in
     conn.execute("delete from resims where account=? and status in ('queued','running')", (account,))  # stale from a crash
     conn.commit()
     t_end, sims, synced = time.time() + hours * 3600, 0, False
-    log(f"runner start: account {account}, {hours}h, max {max_sims} sims, batch {batch}, Lane C share {c_share}")
+    log(f"runner start: account {account}, {hours}h, max {max_sims} sims, batch {batch}, Lane C share {c_share}, "
+        f"regions {', '.join(regions)}")
     while time.time() < t_end and sims < max_sims:
-        brain = _brain(account)
-        if brain is None:
-            lanes.set_state(conn, status="waiting_login", account=account, sims=sims)
+        if not synced and (b := _brain(account)):
+            log(f"synced {lanes.sync_submitted(conn, b, account, catalog)} submitted alphas of {account}")
+            synced = True
+        r = cycle(conn, catalog, account, batch=batch, workers=workers, c_share=c_share, regions=regions,
+                  others=others, sims_left=max_sims - sims)
+        sims += r["sims"]
+        if r["status"] == "waiting_login":
             log(f"session for {account} not live - waiting for a new login (checking every {LOGIN_POLL_SECONDS // 60} min)")
             time.sleep(LOGIN_POLL_SECONDS)
-            continue
-        if not synced:
-            log(f"synced {lanes.sync_submitted(conn, brain, account, catalog)} submitted alphas of {account}")
-            synced = True
-        added = do_revisions(conn, catalog, account, limit=8)
-        if added:
-            log(f"Qwen revisions: {added} new explore variants")
-        ids = build_batch(conn, account, min(batch, max_sims - sims), c_share)
-        if not ids:
-            fresh = fresh_datasets(conn, account)[:explore_limit]
-            if not fresh:
-                log("nothing left to simulate or explore - stopping")
-                break
-            n = 0
-            for ds in fresh:
-                try:
-                    n += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds))
-                except Exception as e:
-                    log(f"  explore {ds['dataset']} failed: {e}")
-            log(f"queues empty - Qwen explored {len(fresh)} fresh datasets, {n} new ideas")
-            continue
-        lanes.set_state(conn, status="simulating", account=account, sims=sims, batch=len(ids))
-        log(f"batch of {len(ids)}: " + ", ".join(f"{k}={v}" for k, v in _lane_counts(conn, ids).items()))
-        st = run_jobs(conn, brain, account, ids, workers)
-        sims += st["done"] + st["error"]
-        if st["expired"]:
-            continue
-        n_picks = after_batch(conn, catalog, brain, account)
-        lanes.set_state(conn, status="idle", account=account, sims=sims, last_batch=st, picks=n_picks)
-        log(f"batch done: {st} | sims so far {sims} | picks {n_picks}")
+        elif r["status"] == "empty":
+            log("nothing left to simulate or explore - stopping")
+            break
     lanes.set_state(conn, status="stopped", account=account, sims=sims)
     log(f"runner stopped after {sims} simulations")
 

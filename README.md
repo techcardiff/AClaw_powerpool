@@ -35,6 +35,23 @@ scripts/export_agent_memory.py   run on the 3080 to export alpha_memory*.db
 Sharpe values are from the original simulations (older settings/periods); every
 candidate must be re-simulated before submission.
 
+## Where it runs (since 2026-10-24)
+
+| Part | Where |
+|---|---|
+| Dashboard, re-sim / explore / rewrite jobs, `data/pp.db`, session cookies | **3080**, `/data/aclaw_powerpool` (Python: `/data/quant-agent/envs/orchestrator/bin/python`) |
+| Qwen3.8 | A6000; the 3080 reaches it through a tunnel on 127.0.0.1:18060 |
+| Telegram login broker | **Mac** (`scripts/start_mac_broker.sh`); Telegram is blocked from the cluster. Each new cookie is copied to the 3080 (`PP_COOKIE_SYNC`). |
+
+- 3080 services run in tmux session `ppminer` (windows `qwen-tunnel`, `web`), started by
+  `scripts/start_3080.sh`; each restarts itself if it exits. Attach: `ssh qa-3080 -t tmux attach -t ppminer`.
+- Dashboard from the Mac: `ssh -N -L 5070:127.0.0.1:5070 qa-3080`, then http://127.0.0.1:5070
+  (or the `ppminer-dashboard` entry in `.claude/launch.json`).
+- Run jobs on the 3080, e.g.
+  `ssh qa-3080 'cd /data/aclaw_powerpool && nohup /data/quant-agent/envs/orchestrator/bin/python -m ppminer resim --lane A --account YO50689 --top 15 > data/logs/resim.log 2>&1 &'`
+- One job per account at a time: several writers on one `pp.db` lock each other out.
+- The Mac copy `data/pp.db.moved-to-3080` is the pre-move snapshot; don't run jobs against it.
+
 ## Setup
 
 ```bash

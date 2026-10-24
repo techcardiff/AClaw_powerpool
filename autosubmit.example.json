@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to data/autosubmit.json. dry_run=true picks and verifies but never submits. Only the scheduler submits.",
+  "start_after_ny": "00:30",
+  "retry_hours": 3,
+  "min_sharpe": 1.15,
+  "regions": ["USA", "EUR", "ASI"],
+  "accounts": {
+    "HT52122": {"enabled": true, "dry_run": true},
+    "YO50689": {"enabled": true, "dry_run": true}
+  }
+}

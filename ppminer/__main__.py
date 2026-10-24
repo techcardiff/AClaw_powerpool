@@ -495,8 +495,22 @@ def main(argv=None):
     sp.add_argument("--batch", type=int, default=8)
     sp.add_argument("--workers", type=int, default=4)
     sp.add_argument("--c-share", type=float, default=0.25, help="share of each batch for Lane C")
+    sp.add_argument("--regions", default="USA", help="comma list for explore, e.g. USA,EUR,ASI")
+    sp.add_argument("--others", default="", help="other accounts whose work this account must not reuse")
     sp.set_defaults(fn=lambda a: __import__("ppminer.runner", fromlist=["run"]).run(
-        DB_PATH, CATALOG_DIR, a.account, a.hours, a.max_sims, a.batch, a.workers, a.c_share))
+        DB_PATH, CATALOG_DIR, a.account, a.hours, a.max_sims, a.batch, a.workers, a.c_share,
+        a.regions.split(","), [o for o in a.others.split(",") if o]))
+    sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
+    sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
+    sp.add_argument("--dry-run", action="store_true", help="never submit, whatever the config says")
+    sp.set_defaults(fn=lambda a: print(__import__("ppminer.autosubmit", fromlist=["run"]).run(
+        DB_PATH, CATALOG_DIR, a.account, a.dry_run)))
+    sp = sub.add_parser("daily", help="scheduler: autosubmit after midnight New York, mine the rest of the day")
+    sp.add_argument("--hours", type=float, default=24 * 365)
+    sp.add_argument("--batch", type=int, default=8)
+    sp.add_argument("--workers", type=int, default=4)
+    sp.set_defaults(fn=lambda a: __import__("ppminer.scheduler", fromlist=["run"]).run(
+        DB_PATH, CATALOG_DIR, a.hours, a.batch, a.workers))
     sp = sub.add_parser("lanes", help="preview the next runner batch without simulating")
     sp.add_argument("--account", required=True)
     sp.add_argument("-n", type=int, default=12)

@@ -78,3 +78,23 @@ def regular_verdict(checks_json: str | None) -> tuple[str, list[str]]:
     if lf.get("result") == "FAIL" and (lf.get("value") or 0) < 0.6 * (lf.get("limit") or 1.0):
         return "fail", fails
     return "near", fails
+
+
+# ── ATOM ────────────────────────────────────────────────────────────────────
+# ATOM: an alpha on a single dataset that passes every test except the IS ladder.
+# Like regular alphas it sits outside the pure Power Pool quota (the 4-per-day
+# overall submission limit still applies).
+NOT_QUALITY = {"MATCHES_THEMES", "REGULAR_SUBMISSION", "OSMOSIS_ALLOCATION"}
+
+
+def atom_verdict(checks_json: str | None, single_dataset: bool) -> tuple[str, list[str]]:
+    """Returns (status, failing): atom_ok | pending | not_atom."""
+    if not single_dataset:
+        return "not_atom", ["more than one dataset"]
+    checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
+    fails = [n for n, c in checks.items() if c.get("result") == "FAIL"
+             and n not in NOT_QUALITY and "LADDER" not in n]
+    if fails:
+        return "not_atom", fails
+    pending = [n for n, c in checks.items() if c.get("result") == "PENDING" and n not in NOT_QUALITY]
+    return ("pending", pending) if pending else ("atom_ok", [])
