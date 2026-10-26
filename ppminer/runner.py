@@ -58,11 +58,16 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
     room = size - len(ids)
     # Lane C part 1: settings sweeps for near misses (one parent per cycle)
-    for parent in lanes.near_misses(conn, account)[:1]:
+    for parent in lanes.near_misses(conn, account):
         _, fails = regular_verdict(parent["checks"])
-        for why, st in lanes.tune_variants(json.loads(parent["settings"]), fails, k=min(3, room)):
+        tried = lanes.tried_settings(conn, account, parent["candidate_id"], parent["expr"])
+        variants = lanes.tune_variants(json.loads(parent["settings"]), fails, k=min(3, room), tried=tried)
+        if not variants:
+            continue          # e.g. only self-correlation fails: no setting can fix that
+        for why, st in variants:
             ids.append(_enqueue(conn, account, "C", f"tune: {why}", parent["candidate_id"], parent["expr"], st, parent["id"]))
             room -= 1
+        break                 # one parent per cycle
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
     in_batch = {r["id"] for r in rows_a}
     for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch), others):

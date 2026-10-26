@@ -171,16 +171,21 @@ def lane_c(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (
     return _without(rows, o_ids, n)
 
 
-def tune_variants(settings: dict, fails: list[str], k: int = 4) -> list[tuple[str, dict]]:
-    """Settings-only variants aimed at the failing regular checks."""
+def tune_variants(settings: dict, fails: list[str], k: int = 4, tried: list[dict] = ()) -> list[tuple[str, dict]]:
+    """Settings-only variants aimed at the failing regular checks, skipping any
+    settings this alpha was already simulated with (BRAIN would just return the
+    same alpha)."""
     out = []
 
     def add(why, **ch):
         s = dict(settings, **ch)
-        if s != settings and all(s != o for _, o in out):
+        if s != settings and all(s != o for _, o in out) and s not in tried:
             out.append((why, s))
 
     neut = settings.get("neutralization")
+    if "LOW_SUB_UNIVERSE_SHARPE" in fails and settings.get("universe") == "TOP3000":
+        # weak in the more liquid names: a liquid universe addresses that directly
+        add("universe TOP1000 for sub-universe sharpe", universe="TOP1000")
     if "CONCENTRATED_WEIGHT" in fails:
         add("truncation 0.05 against concentrated weight", truncation=0.05)
         add("truncation 0.03", truncation=0.03)
@@ -191,15 +196,23 @@ def tune_variants(settings: dict, fails: list[str], k: int = 4) -> list[tuple[st
         for nn in ("SUBINDUSTRY", "INDUSTRY", "SECTOR", "MARKET"):
             if nn != neut:
                 add(f"neutralization {nn}", neutralization=nn)
-        if settings.get("universe") == "TOP3000":
-            add("universe TOP1000", universe="TOP1000")
     return out[:k]
 
 
 def near_misses(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
+    """Original (non-tune) results that are regular near misses and were never tuned.
+    Tune results are never tuned again: that looped through neutralizations and
+    re-simulated the same alphas (235 of 276 Lane C runs on 24-26 Oct)."""
     rows = conn.execute("""select r.* from resims r where r.account=? and r.status='done'
-                           and r.id not in (select coalesce(parent_resim_id, -1) from resims)""", (account,)).fetchall()
+                           and coalesce(r.purpose, '') not like 'tune%'
+                           and not exists (select 1 from resims t where t.parent_resim_id = r.id)
+                           order by r.sharpe desc""", (account,)).fetchall()
     return [r for r in rows if regular_verdict(r["checks"])[0] == "near"]
+
+
+def tried_settings(conn: sqlite3.Connection, account: str, candidate_id: int, expr: str) -> list[dict]:
+    return [json.loads(st) for (st,) in conn.execute(
+        "select settings from resims where account=? and candidate_id=? and expr=?", (account, candidate_id, expr))]
 
 
 def is_pp(row: sqlite3.Row) -> bool:

@@ -99,3 +99,13 @@ def test_quality_gate_on_real_alphas():
     assert any("sharpe" in w for w in weak) and any("fitness" in w for w in weak) and any("turnover" in w for w in weak)
     assert quality_gate(1.42, 1.09, 0.02, chk(0.64, 2.09)) != []          # xA15d0dW: middle, sharpe and sub-universe
     assert quality_gate(1.42, 1.09, 0.02, chk(0.64, 2.09), {"min_sharpe": 1.3, "min_sub_universe_sharpe": 0.6}) == []
+
+
+def test_tune_variants_skip_tried_and_prefer_liquid_universe():
+    from ppminer.lanes import tune_variants
+    base = {"universe": "TOP3000", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
+    v = tune_variants(base, ["LOW_SUB_UNIVERSE_SHARPE"], k=3)
+    assert v[0][1]["universe"] == "TOP1000"
+    tried = [s for _, s in v]
+    again = tune_variants(base, ["LOW_SUB_UNIVERSE_SHARPE"], k=3, tried=tried)
+    assert all(s not in tried for _, s in again)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from itertools import zip_longest
 
 from .expr import skeleton
 from .theme import Theme
@@ -30,7 +31,7 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
     done = done | (skip_ids or set())
     allowed_cache: dict = {}
     per_ds, per_shape, twins = Counter(), Counter(), set()
-    proven, fresh = [], []
+    proven, fresh_by_region = [], {}
     for row in conn.execute(q, statuses):
         if row["id"] in done:
             continue
@@ -60,15 +61,23 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
         shape = _shape(row["skeleton"] or skeleton(row["expr"], lambda f: f))
         twin = (shape, _stems(json.loads(row["fields"])))
         is_new = row["sharpe"] is None           # explore/rewrite ideas, never simulated
+        if is_new and len(fresh_by_region.get(row["region"], [])) >= n:
+            continue
         cap = 2 if is_new else max_per_dataset   # spread untested ideas over many datasets
         if per_ds[ds] >= cap or per_shape[(is_new, shape)] >= max_per_shape or twin in twins:
             continue
         per_ds[ds] += 1
         per_shape[(is_new, shape)] += 1
         twins.add(twin)
-        (fresh if is_new else proven).append(row)
-        if len(proven) >= n and len(fresh) >= n:
+        if is_new:
+            fresh_by_region.setdefault(row["region"], []).append(row)
+        else:
+            proven.append(row)
+        if len(proven) >= n and sum(map(len, fresh_by_region.values())) >= 3 * n:
             break
+    # untested ideas round-robin across regions: otherwise the large USA backlog
+    # (older ids) always wins and EUR/ASI ideas never get simulated
+    fresh = [r for group in zip_longest(*fresh_by_region.values()) for r in group if r is not None]
     # 2 proven (old sharpe) : 1 fresh idea, so new data gets simulated every batch
     out, pi, fi = [], iter(proven), iter(fresh)
     while len(out) < n:
