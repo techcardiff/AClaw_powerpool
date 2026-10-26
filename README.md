@@ -51,7 +51,9 @@ candidate must be re-simulated before submission.
 
 - 3080 services run in tmux session `ppminer` (windows `qwen-tunnel`, `web`), started by
   `scripts/start_3080.sh`; each restarts itself if it exits. Attach: `ssh qa-3080 -t tmux attach -t ppminer`.
-- Dashboard from the Mac: `ssh -N -L 5070:127.0.0.1:5070 qa-3080`, then http://127.0.0.1:5070
+- Dashboard: **https://alpha.hokin.cloud** (VPS nginx with HTTPS + password, reached through the 3080's
+  `tunnel` window; credentials in `/etc/nginx/.htpasswd-alpha` on the VPS, ask the owner).
+  From the Mac without the VPS: `ssh -N -L 5070:127.0.0.1:5070 qa-3080`, then http://127.0.0.1:5070
   (or the `ppminer-dashboard` entry in `.claude/launch.json`).
 - Run jobs on the 3080, e.g.
   `ssh qa-3080 'cd /data/aclaw_powerpool && nohup /data/quant-agent/envs/orchestrator/bin/python -m ppminer resim --lane A --account YO50689 --top 15 > data/logs/resim.log 2>&1 &'`

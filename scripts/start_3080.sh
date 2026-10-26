@@ -7,6 +7,9 @@
 #            web          dashboard on 127.0.0.1:5070 (view from the Mac: ssh -N -L 5070:127.0.0.1:5070 qa-3080)
 #            daily        scheduler: Power Pool auto-submit after midnight New York, mining the rest of
 #                         the day (config data/autosubmit.json; the only thing that submits)
+#            tunnel       reverse SSH tunnel to the VPS, which serves the dashboard as
+#                         https://alpha.hokin.cloud (nginx + basic auth there). The key
+#                         ~/.ssh/aclaw_alpha_tunnel may only listen on the VPS's 127.0.0.1:15070
 #
 # To restart a service, kill its window (tmux kill-window -t ppminer:web) and run this
 # script again. Don't pkill by pattern: the window's restart loop matches it too.
@@ -24,6 +27,10 @@ TUNNEL="while true; do ssh -o BatchMode=yes -o ExitOnForwardFailure=yes -o Serve
   -N -L 18060:127.0.0.1:8060 $A6000 >> $LOG/qwen_tunnel.log 2>&1; echo \"\$(date) tunnel exited, restarting\" >> $LOG/qwen_tunnel.log; sleep 10; done"
 WEB="cd $ROOT && while true; do PP_BROKER_ELSEWHERE=1 PYTHONUNBUFFERED=1 $PY -m ppminer web --port 5070 >> $LOG/web.log 2>&1; \
   echo \"\$(date) web exited, restarting\" >> $LOG/web.log; sleep 5; done"
+VPS=veghere@187.127.121.110
+TUNNEL_WEB="while true; do ssh -i ~/.ssh/aclaw_alpha_tunnel -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -N -R 127.0.0.1:15070:127.0.0.1:5070 $VPS \
+  >> $LOG/web_tunnel.log 2>&1; echo \"\$(date) web tunnel exited, restarting\" >> $LOG/web_tunnel.log; sleep 10; done"
 DAILY="cd $ROOT && while true; do PYTHONUNBUFFERED=1 $PY -m ppminer daily >> $LOG/daily.log 2>&1; \
   echo \"\$(date) daily exited, restarting\" >> $LOG/daily.log; sleep 30; done"
 
@@ -39,3 +46,4 @@ ensure() {   # ensure <window-name> <command>
 ensure qwen-tunnel "$TUNNEL"
 ensure web "$WEB"
 ensure daily "$DAILY"
+ensure tunnel "$TUNNEL_WEB"
