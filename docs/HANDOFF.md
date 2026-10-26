@@ -1,7 +1,7 @@
 # Handoff: AClaw Power Pool miner (`ppminer`)
 
 For a student taking over development. Read this first, then `README.md` for
-day-to-day commands. Written 24 Oct 2026.
+day-to-day commands. Written 24 Oct 2026, updated 26 Oct 2026.
 
 ---
 
@@ -38,43 +38,86 @@ That is "Lane C" below.
 ## 2. How the pipeline works
 
 ```
- past research (old agent DB, Alpha Studio DB)
-        │ harvest            ─ parse, dedupe, check PP shape locally
+ SOURCES OF IDEAS                                   (all land in pp.db: candidates)
+   past research        harvest.py   old agent DB + Alpha Studio DB, deduped, checked locally
+   Qwen rewrites        purify.py    strong mixed-category alphas rewritten into one category
+   Qwen explore         explore.py   new ideas on datasets we never mined (USA, EUR, ASI)
+   Qwen revisions       revise.py    explore ideas revised after seeing their results
+   templates            templates.py Alpha Studio Search 1/2/3 on any synced region
+   manual               Search page  an expression typed by a person (lane M)
+        │
         ▼
- candidates (pp.db) ──► Lane A  ─ PP inventory: harvested, Qwen rewrites, Qwen explore ideas
-                    └─► Lane C  ─ regular alphas + settings sweeps of near misses
-        │ runner / resim     ─ simulate on BRAIN with an account's session
+ SCHEDULER (scheduler.py, `ppminer daily`, 3080)  one cycle per account, all day:
+   field sync           a few datasets per region per pass (fields.sync_step)
+   batch                lane M (manual) first, then Lane A (Power Pool inventory, fresh ideas
+                        round-robin across regions), then Lane C (regular/ATOM: funnel.py fixes
+                        the failing check of the best near miss, plus regular-grade harvest)
+   simulate             runner.run_jobs on BRAIN with the account's session (resims table)
+   verdicts             verdict.py: Power Pool / regular / ATOM, from BRAIN's own checks
+   pick list            picks.py: daily PnL, fold anything correlating >= 0.5, one per cluster
+        │
         ▼
- resims (pp.db)     ──► verdicts (verdict.py): Power Pool + regular, from BRAIN's own checks
-        │ picklist           ─ pull daily PnL, fold anything correlating ≥ 0.5, one pick per cluster
-        ▼
- picks + descriptions (Qwen) ──► dashboard ──► human approves ──► submit
+ AUTO-SUBMIT (autosubmit.py, once the New York day starts, retried every 3 h)
+   quota (quota.py) -> fresh BRAIN check -> quality bar -> verified description (descheck.py)
+   -> submit -> confirm ACTIVE + PowerPoolSelected -> autosubmit_log
 ```
 
-**Only the daily scheduler submits** (`ppminer daily` → `autosubmit.py`), within each account's quota and
-only after a fresh BRAIN check and a verified description. It runs in **dry-run mode** per account until
-switched on in `data/autosubmit.json`. No person or session submits by hand.
+**Only the scheduler submits.** It respects each account's Power Pool quota calendar, requires
+Power Pool correlation PASS, applies the quality bar in `data/autosubmit.json` (Sharpe >= 1.5,
+fitness >= 1.0, turnover <= 0.4, last-2y Sharpe >= 1.0, sub-universe >= 0.7) and leaves slots
+empty rather than submit weak alphas. Dry run is per account in the same file.
 
-Qwen3.8-27B (on the A6000) does the language work: rewriting mixed-category alphas into
-one category (`purify.py`), proposing alphas on new datasets (`explore.py`), revising
-ideas after seeing their results (`revise.py`), and writing descriptions (`describe.py`).
+Qwen3.8-27B (on the A6000) does all the language work: rewrites, explore ideas, revisions,
+descriptions, and the second-pass audit of every description before it goes on BRAIN.
 
 ---
 
-## 3. Where it runs
+## 3. Where it runs (the structure)
+
+```
+                         you / the student (browser)
+                                   │ https + password
+                                   ▼
+  ┌──────────── VPS (veghere-vps) ────────────┐
+  │ nginx: alpha.hokin.cloud                  │   HTTPS (certbot, renews itself)
+  │   basic auth (/etc/nginx/.htpasswd-alpha) │   other sites on this VPS: eazyteach, mailcow, ...
+  │   proxy -> 127.0.0.1:15070                │   (don't touch them)
+  └───────────────────▲───────────────────────┘
+                      │ reverse SSH tunnel (key may only listen on 127.0.0.1:15070)
+  ┌───────────────────┴──── 3080 (qa-3080), /data/aclaw_powerpool ─────────────────┐
+  │ tmux session "ppminer", started by scripts/start_3080.sh:                      │
+  │   qwen-tunnel   127.0.0.1:18060 -> A6000 Qwen3.8                               │
+  │   web           dashboard + Search page on 127.0.0.1:5070                      │
+  │   daily         the scheduler (mining + the only submitter)                    │
+  │   tunnel        reverse tunnel to the VPS (the public website)                 │
+  │ data/pp.db (the live database), data/secrets/*.cookie, data/autosubmit.json    │
+  └───────▲──────────────────────────────────────────────▲─────────────────────────┘
+          │ ssh tunnel                                    │ fresh session cookies (restricted key)
+  ┌───────┴──────── A6000 (qa-a6000) ──┐      ┌──────────┴──── lab workstation ──────────────┐
+  │ Qwen3.8-27B vLLM, port 8060        │      │ Telegram login broker (start_ws_broker.sh)    │
+  │ (process owned by another lab user)│      │ internet via a Tailscale exit node            │
+  └────────────────────────────────────┘      └──────────────▲────────────────────────────────┘
+                                                             │ face-scan link
+                                                       account owners' phones (Telegram)
+```
 
 | Part | Where | Notes |
 |---|---|---|
-| Miner jobs, dashboard, `data/pp.db`, session cookies | **3080 server**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux session `ppminer` (windows `qwen-tunnel`, `web`, `daily` = scheduler), started by `scripts/start_3080.sh` (safe to re-run; restart one service with `tmux kill-window -t ppminer:<name>` then the script, never `pkill -f`). The @reboot cron entry (`scripts/install_3080_cron.sh`) is **not installed yet**, so after a 3080 restart run `scripts/start_3080.sh` by hand |
-| Qwen3.8-27B (vLLM) | **A6000 server**, port 8060, reached through a tunnel on 127.0.0.1:18060 | The vLLM process belongs to **another lab user**; if they stop it, all Qwen steps fail until it's back. Simulations still work. |
-| Telegram login broker | **Lab workstation** (`~/aclaw_powerpool`, `scripts/start_ws_broker.sh`), since 26 Oct | Telegram is blocked from the cluster and the workstation's network, so the workstation routes through a **Tailscale exit node**; if that node goes offline, the workstation loses internet and logins stop. Runs in a restart loop; after a workstation reboot, start it by hand (no @reboot entry yet). New session cookies are copied to the 3080 with a dedicated `restrict`ed SSH key. Only one broker may run: `scripts/start_mac_broker.sh` is a fallback only. |
+| Website | **https://alpha.hokin.cloud** | nginx on the VPS, HTTPS + password; ask the supervisor for the login. Everyone with the password can queue simulations and approve picks, so don't share it further. |
+| Miner, scheduler, dashboard, `data/pp.db`, cookies | **3080**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux `ppminer` (windows above). `scripts/start_3080.sh` is safe to re-run and re-adds any missing window. Restart one service: `tmux kill-window -t ppminer:<name>`, then the script; never `pkill -f`. **No @reboot entry is installed**: after a 3080 restart, run the script by hand. Logs: `data/logs/{daily,web,web_tunnel,qwen_tunnel}.log`. |
+| Qwen3.8-27B (vLLM) | **A6000**, port 8060 | Owned by **another lab user**; if it stops, Qwen steps fail until it's back. Simulations keep working. |
+| Telegram login broker | **Lab workstation** (`~/aclaw_powerpool`, `scripts/start_ws_broker.sh`), since 26 Oct | Telegram is blocked on the cluster and the workstation's network, so the workstation goes out through a **Tailscale exit node**. Logs every message it sends (`data/logs/telegram.log` there). After a reboot, start it by hand. **Run only one broker** (`start_mac_broker.sh` is a fallback). |
 | Code | GitHub `techcardiff/AClaw_powerpool` | `data/` and `ref/` are git-ignored on purpose |
 
-SSH host aliases (`qa-3080`, `qa-a6000`) come from the supervisor's `~/.ssh/config`;
-ask for your own key rather than sharing one.
+**Daily checks (5 minutes):** open the website; the tiles show the scheduler status and session
+state; the **auto-submit log** shows what was submitted or skipped and why; the **Search** page's
+Funnel tab shows where ideas drop out and which BRAIN checks block regular/ATOM alphas.
 
-Dashboard from your laptop: `ssh -N -L 5070:127.0.0.1:5070 qa-3080`, then open
-http://127.0.0.1:5070.
+**Sessions:** BRAIN sessions last about 4 hours. The broker sends each owner a face-scan link
+before expiry; while a session is expired, that account's mining and submissions wait.
+
+SSH host aliases (`qa-3080`, `qa-a6000`, `veghere-vps`) come from the supervisor's `~/.ssh/config`;
+ask for your own key rather than sharing one.
 
 ---
 
@@ -87,10 +130,12 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 | `expr.py` | FASTEXPR parser: operator count, data fields, canonical form, skeleton, **lint** (vector fields need `vec_*`, no scientific notation, no `ts_corr(x, x)`, no quoted groups) | BRAIN rejects an expression our checks let through |
 | `pp.py` | Local Power Pool checks (`check()`), `submit_expr()` (sign flip for negative Sharpe) | the Power Pool rules change |
 | `catalog.py` | Field → category / dataset / type, from catalog snapshots plus per-account synced fields | |
-| `fields.py` | `fields-sync`: which datasets/fields an account can use; block list of fields BRAIN rejected | accounts see different data (e.g. no `model77`) |
+| `fields.py` | which datasets/fields an account can use per region; `sync_step()` runs inside the scheduler (resumable, never deletes); block list of fields BRAIN rejected | accounts see different data (e.g. no `model77`) |
 | `harvest.py` | Import past simulations, dedupe, classify (`pp_ready`, `pp_multi`, `purify`, `weak`, `reject`) | adding a new source of old alphas |
 | `select.py` | `shortlist()`: diverse selection (one per family, caps per dataset and per operator shape, skips known collisions) | selection is too narrow or too repetitive |
-| `lanes.py` | Lane A / Lane C queues, collision families, settings sweeps for near misses, sync of an account's submitted alphas | changing what each lane works on |
+| `lanes.py` | Lane A / Lane C queues, collision families, other-account exclusion, sync of an account's submitted alphas | changing what each lane works on |
+| `funnel.py` | Lane C tiered funnel: fixes the failing regular check by expression (size buckets / liquid names for sub-universe Sharpe, `rank()` for concentration, smoothing for turnover); stops on self-correlation | regular/ATOM strategy |
+| `templates.py` | Alpha Studio Search 1 (`ts_op`, `group_rank`), 2 (same-dataset A/B, `ts_corr`), 3 (`trade_when` conditions) for any region | adding templates |
 | `runner.py` | `run`: the continuous loop (revise → batch → simulate → recheck → pick list → explore); waits for a new login when the session expires | changing the loop or its priorities |
 | `revise.py` | Qwen feedback loop for explore ideas (flip / drop / revise, up to 3 rounds) | improving how ideas get revised |
 | `explore.py` | Qwen ideas on datasets we have never mined (prompt with a menu of structures) | prompt work |
@@ -107,7 +152,8 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 | `autosubmit.py` | **The only submitter**: quota, fresh check, `min_sharpe`, verified description, submit, log | submission policy |
 | `scheduler.py` | `ppminer daily`: auto-submit after midnight New York, mining cycles for every account in between | scheduling |
 | `markets.py` | Per-region universe and neutralization (EUR, ASI, …) | adding a market |
-| `web.py`, `web.html` | Dashboard (read-only view, login and pick buttons, auto-submit log) | UI work |
+| `web.py`, `web.html` | Dashboard: tiles, accounts/login, pick list, auto-submit log, Lane C table, re-simulations | UI work |
+| `search.py`, `search.html` | **Search page** (`/search`): Funnel, Datasets map, Editor (check + queue a simulation, lane M), Templates (preview + queue) | search UI |
 | `db.py` | Main schema; `lanes.migrate()` adds the newer columns/tables | schema changes |
 | `__main__.py` | CLI | adding a command |
 
@@ -115,14 +161,16 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 | Table | Content |
 |---|---|
-| `candidates` | every alpha idea (harvested, rewrite, explore), local checks, status, family |
-| `resims` | each simulation on BRAIN: account, expression, settings, results, raw checks JSON, lane, purpose |
+| `candidates` | every alpha idea (status `pp_ready`, `pp_multi`, `purify`, `rewrite`, `explore`, `template`, `funnel`, `manual`, …), local checks, family |
+| `resims` | each simulation on BRAIN: account, expression, settings, results, raw checks JSON, lane (`A`, `C`, `M`), purpose |
 | `picks` | pick list per account, status `proposed` / `approved` / `rejected` / `submitted` |
 | `descriptions`, `rewrites`, `llm_jobs` | Qwen outputs |
 | `pnl` | cached daily PnL per alpha |
 | `account_fields`, `account_datasets`, `field_blocklist` | per-account data access |
 | `account_submitted` | each account's submitted alphas (for collision checks) |
-| `runner_state` | what the runner is doing (shown on the dashboard) |
+| `runner_state` | what the scheduler is doing (shown on the dashboard) |
+| `autosubmit_log` | every auto-submit decision: quota, skip (with reason), dry run, submitted |
+| `field_sync_progress` | which datasets of which region are synced for each account |
 
 ---
 
@@ -183,6 +231,18 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
   "different" alphas are the same 10-day reversal or the same analyst-estimate family.
 - **One-shot Qwen ideas on new data mostly score Sharpe < 0.5.** The value is in the revise loop.
 - Sessions last about 4 hours; the runner waits and resumes after a new login.
+- **Regular alphas here are blocked by two checks:** `LOW_SUB_UNIVERSE_SHARPE` (the signal earns in
+  small, illiquid names: switching to TOP1000 cut Sharpe from ~2.4 to ~1.2) and `SELF_CORRELATION`
+  against the account's many submitted alphas (HT52122 has 137). Settings sweeps don't fix either;
+  `funnel.py` changes the expression for sub-universe and stops on self-correlation. New datasets and
+  regions (EUR/ASI templates) are the better route.
+- **Never tune a tuned result:** an early version re-tuned its own results and looped through
+  neutralizations; 235 of 276 Lane C simulations were repeats of 41 alphas. The funnel now skips any
+  expression + settings already tried.
+- The **untested-idea slots** are shared round-robin across regions; before that, the big USA backlog
+  starved EUR/ASI completely.
+- Several processes write `pp.db` (scheduler, dashboard, syncs): connections wait up to 120 s for the
+  lock. Long one-off jobs belong inside the scheduler (like the field sync), not beside it.
 
 ---
 
@@ -204,15 +264,19 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 ---
 
-## 9. Current state (24 Oct 2026)
+## 9. Current state (26 Oct 2026)
 
-- Accounts: **HT52122** and **YO50689**, each in week 1 of Power Pool. Both have Power Pool alphas
-  submitted; see the dashboard's pick list for which.
-- The miner and its database live on the 3080; the Telegram broker runs on the lab workstation
-  (moved from the Mac on 26 Oct, see section 3).
-- The `daily` scheduler is the single submitter; it was deployed in dry-run mode on 24 Oct, with
-  `min_sharpe` 1.15. EUR and ASI field syncs were started the same day.
-- The @reboot cron entry is not installed: after a 3080 restart run `scripts/start_3080.sh`.
-- There are no notifications from the 3080 (Telegram is blocked there): check the dashboard's auto-submit log.
+- **Accounts:** HT52122 and YO50689, both in weeks 1-2 of Power Pool (first submissions 23 Oct, so
+  4 per day until about 5 Nov, then 2, then 1; theme required from about 4 Dec). HT52122 has 7
+  Power Pool alphas, YO50689 has 11. Weak early ones stay tagged on purpose (decision of 26 Oct).
+- **The scheduler submits for real** (dry run off since 24 Oct) with the quality bar of 26 Oct, so
+  expect a few submissions a week rather than 4 a day.
+- **Regular / ATOM:** none passed yet; the funnel and EUR/ASI templates were deployed on 26 Oct.
+- **Field sync:** USA complete; EUR and ASI syncing a few datasets per pass inside the scheduler.
+- **Website:** https://alpha.hokin.cloud since 26 Oct (VPS nginx + password + reverse tunnel).
+- **Broker:** on the lab workstation (moved from the Mac on 26 Oct).
+- No @reboot entries anywhere: after a restart of the 3080 run `scripts/start_3080.sh`, after a
+  restart of the workstation run `scripts/start_ws_broker.sh`.
+- No notifications from the 3080 (Telegram is blocked there): check the website's auto-submit log.
 
 Questions: ask your supervisor, who has the history of this project.
