@@ -44,7 +44,7 @@ case "${1:-}" in
     [ -e "$SBX" ] && { echo "$SBX already exists"; exit 1; }
     # GitHub is flaky from the cluster; a bundle made elsewhere also works:
     #   git bundle create main.bundle main   (on a laptop), copy it over, then: sandbox.sh create main.bundle
-    git clone "${2:-$REPO}" "$SBX"
+    git clone -b main "${2:-$REPO}" "$SBX"
     git -C "$SBX" remote set-url origin "$REPO"            # pushing needs your own GitHub login
     git -C "$SBX" checkout -b "$NAME"
     mkdir -p "$SBX/data/logs" "$SBX/data/reports"
