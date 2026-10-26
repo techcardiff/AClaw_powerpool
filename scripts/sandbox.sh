@@ -5,7 +5,7 @@
 # (HT52122, sharing the live session cookie) but can never submit (PP_SANDBOX=1).
 # The live dashboard shows it at https://alpha.hokin.cloud/song/ (same password).
 #
-#   bash /data/aclaw_powerpool/scripts/sandbox.sh create      clone into /data/aclaw_song, branch song, copy data
+#   bash /data/aclaw_powerpool/scripts/sandbox.sh create [bundle]   clone into /data/aclaw_song, branch song, copy data
 #   bash /data/aclaw_song/scripts/sandbox.sh start            start the sandbox web page (tmux session "song")
 #   bash /data/aclaw_song/scripts/sandbox.sh start daily      also start the sandbox's own scheduler (mining loop)
 #   bash /data/aclaw_song/scripts/sandbox.sh stop             stop everything in tmux session "song"
@@ -18,6 +18,7 @@ set -eu
 NAME=song
 PORT=5071
 LIVE=/data/aclaw_powerpool
+REPO=https://github.com/techcardiff/AClaw_powerpool.git
 SBX=/data/aclaw_$NAME
 PY=/data/quant-agent/envs/orchestrator/bin/python
 LOG=$SBX/data/logs
@@ -41,7 +42,10 @@ EOF
 case "${1:-}" in
   create)
     [ -e "$SBX" ] && { echo "$SBX already exists"; exit 1; }
-    git clone "$(git -C "$LIVE" remote get-url origin)" "$SBX"
+    # GitHub is flaky from the cluster; a bundle made elsewhere also works:
+    #   git bundle create main.bundle main   (on a laptop), copy it over, then: sandbox.sh create main.bundle
+    git clone "${2:-$REPO}" "$SBX"
+    git -C "$SBX" remote set-url origin "$REPO"            # pushing needs your own GitHub login
     git -C "$SBX" checkout -b "$NAME"
     mkdir -p "$SBX/data/logs" "$SBX/data/reports"
     cp -r "$LIVE/data/catalog" "$SBX/data/catalog"
