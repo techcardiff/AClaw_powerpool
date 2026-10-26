@@ -151,12 +151,75 @@ def datasets(conn, account: str, region: str) -> list[dict]:
 
 
 def template_preview(conn, account: str, region: str, kind: str, dataset: str | None, n_fields: int,
-                     base_expr: str | None) -> list[dict]:
-    rows = templates.generate(conn, catalog(conn, account), account, region, kind, dataset, n_fields, base_expr)
+                     base_expr: str | None, order: str = "coverage", fields: list[str] | None = None) -> list[dict]:
+    rows = templates.generate(conn, catalog(conn, account), account, region, kind, dataset, n_fields, base_expr,
+                              order, fields)
     return [{k: r[k] for k in ("expr", "kind", "ops", "datasets", "problems")} for r in rows]
 
 
 def template_queue(conn, account: str, region: str, kind: str, dataset: str | None, n_fields: int,
-                   base_expr: str | None) -> int:
-    rows = templates.generate(conn, catalog(conn, account), account, region, kind, dataset, n_fields, base_expr)
+                   base_expr: str | None, order: str = "coverage", fields: list[str] | None = None) -> int:
+    rows = templates.generate(conn, catalog(conn, account), account, region, kind, dataset, n_fields, base_expr,
+                              order, fields)
     return templates.save(conn, region, rows, source=f"template:{kind}:{account}")
+
+
+# ── Fields tab ──────────────────────────────────────────────────────────────
+FIELD_SORTS = {
+    "alphas": "coalesce(f.alpha_count, 0) desc",          # most used on the platform: proven, crowded
+    "users": "coalesce(f.user_count, 0) desc",
+    "coverage": "coalesce(f.coverage, 0) desc, coalesce(f.user_count, 0) desc",
+    "fresh": "coalesce(f.alpha_count, 0) asc, coalesce(f.coverage, 0) desc",   # least used, decent coverage
+}
+FRESH_MIN_COVERAGE = 0.6
+
+
+def _own_field_stats(conn, account: str, region: str) -> dict:
+    """Per field: how often we simulated it on this account, best Sharpe, Power Pool OKs."""
+    out: dict = {}
+    for r in conn.execute("""select r.id, r.sharpe, r.checks, c.fields, c.single_dataset from resims r
+                             join candidates c on c.id = r.candidate_id
+                             where r.account=? and r.status='done' and c.region=?""", (account, region)):
+        v = verdicts(r)
+        for f in json.loads(r["fields"] or "[]"):
+            s = out.setdefault(f, {"sims": 0, "best": None, "pp_ok": 0})
+            s["sims"] += 1
+            if r["sharpe"] is not None:
+                s["best"] = r["sharpe"] if s["best"] is None else max(s["best"], r["sharpe"])
+            s["pp_ok"] += v["pp"] == "pp_ok"
+    return out
+
+
+def fields(conn, account: str, region: str, dataset: str | None = None, category: str | None = None,
+           ftype: str | None = None, min_cov: float = 0.0, q: str | None = None, sort: str = "alphas",
+           limit: int = 300) -> dict:
+    where, args = ["f.account=?", "f.region=?"], [account, region]
+    if dataset:
+        where.append("f.dataset=?"); args.append(dataset)
+    if category:
+        where.append("f.category=?"); args.append(category)
+    if ftype:
+        where.append("f.type=?"); args.append(ftype)
+    if sort == "fresh":
+        # least used, but used at least once: never-used fields are mostly metadata (flags, timestamps)
+        min_cov = max(min_cov, FRESH_MIN_COVERAGE)
+        where.append("coalesce(f.alpha_count, 0) >= 1")
+    if min_cov:
+        where.append("coalesce(f.coverage, 0) >= ?"); args.append(min_cov)
+    if q:
+        where.append("(f.field like ? or f.description like ?)"); args += [f"%{q}%", f"%{q}%"]
+    total = conn.execute(f"select count(*) from account_fields f where {' and '.join(where)}", args).fetchone()[0]
+    rows = conn.execute(f"""select f.field, f.dataset, f.category, f.type, f.coverage, f.user_count, f.alpha_count,
+                                   f.description from account_fields f where {' and '.join(where)}
+                            order by {FIELD_SORTS.get(sort, FIELD_SORTS['alphas'])} limit ?""", args + [limit]).fetchall()
+    own = _own_field_stats(conn, account, region)
+    blocked = {b for (b,) in conn.execute("select field from field_blocklist where account=?", (account,))}
+    out = []
+    for r in rows:
+        d = dict(r)
+        d.update(own.get(r["field"], {"sims": 0, "best": None, "pp_ok": 0}))
+        d["blocked"] = r["field"] in blocked
+        out.append(d)
+    cats = [c for (c,) in conn.execute("select distinct category from account_fields where account=? and region=? "
+                                       "order by 1", (account, region))]
+    return {"total": total, "rows": out, "categories": cats}

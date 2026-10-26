@@ -42,11 +42,30 @@ def groups_for(region: str) -> tuple[str, ...]:
     return ("industry", "country") if region.upper() in ("EUR", "ASI", "GLB") else ("industry",)
 
 
-def top_fields(conn: sqlite3.Connection, account: str, region: str, dataset: str, n: int) -> list[sqlite3.Row]:
-    return conn.execute("""select field, type, coverage from account_fields
-                           where account=? and region=? and dataset=? and type in ('MATRIX', 'VECTOR')
-                           order by coalesce(coverage, 0) desc, coalesce(user_count, 0) desc limit ?""",
-                        (account, region, dataset, n)).fetchall()
+FIELD_ORDERS = {
+    "alphas": "coalesce(alpha_count, 0) desc",                      # proven on the platform, more crowded
+    "fresh": "coalesce(alpha_count, 0) asc, coalesce(coverage, 0) desc",   # least used: lower correlation
+    "coverage": "coalesce(coverage, 0) desc, coalesce(user_count, 0) desc",
+}
+ORDER_MIN_COVERAGE = 0.6        # 'alphas' / 'fresh' ignore sparse fields
+
+
+def top_fields(conn: sqlite3.Connection, account: str, region: str, dataset: str, n: int,
+               order: str = "coverage") -> list[sqlite3.Row]:
+    min_cov = ORDER_MIN_COVERAGE if order in ("alphas", "fresh") else 0.0
+    return conn.execute(f"""select field, type, coverage from account_fields
+                            where account=? and region=? and dataset=? and type in ('MATRIX', 'VECTOR')
+                              and coalesce(coverage, 0) >= ? and (? <> 'fresh' or coalesce(alpha_count, 0) >= 1)
+                            order by {FIELD_ORDERS.get(order, FIELD_ORDERS['coverage'])} limit ?""",
+                        (account, region, dataset, min_cov, order, n)).fetchall()
+
+
+def chosen_fields(conn: sqlite3.Connection, account: str, region: str, names: list[str]) -> list[sqlite3.Row]:
+    """Fields picked by hand on the Fields tab (any datasets), in the order given."""
+    rows = {r["field"]: r for r in conn.execute(
+        f"""select field, type, coverage, dataset from account_fields where account=? and region=?
+            and field in ({','.join('?' * len(names))})""", (account, region, *names))}
+    return [rows[n] for n in names if n in rows]
 
 
 def _wrap(f: sqlite3.Row) -> str:
@@ -55,11 +74,15 @@ def _wrap(f: sqlite3.Row) -> str:
 
 
 def generate(conn: sqlite3.Connection, catalog: Catalog, account: str, region: str, kind: str,
-             dataset: str | None = None, n_fields: int = 6, base_expr: str | None = None) -> list[dict]:
-    """Expressions for one template kind; each dict has expr, kind, check problems (empty = valid)."""
+             dataset: str | None = None, n_fields: int = 6, base_expr: str | None = None,
+             order: str = "coverage", fields: list[str] | None = None) -> list[dict]:
+    """Expressions for one template kind; each dict has expr, kind, check problems (empty = valid).
+    `fields` (picked on the Fields tab) replaces the automatic top-n of `dataset`; Search 2 then
+    pairs only fields of the same dataset."""
     exprs: list[tuple[str, str]] = []
     if kind in ("s1", "s2"):
-        fields = top_fields(conn, account, region, dataset, n_fields)
+        picked = chosen_fields(conn, account, region, fields) if fields else None
+        fields = picked if picked is not None else top_fields(conn, account, region, dataset, n_fields, order)
         wrapped = [_wrap(f) for f in fields]
         if kind == "s1":
             for x, op, w in itertools.product(wrapped, TS_OPS, WINDOWS):
@@ -67,11 +90,16 @@ def generate(conn: sqlite3.Connection, catalog: Catalog, account: str, region: s
             for x, op, w, g in itertools.product(wrapped, ("ts_rank", "ts_zscore"), WINDOWS[-1:], groups_for(region)):
                 exprs.append((f"group_rank({op}({x}, {w}), {g})", "s1 layer 2"))
         else:
+            ds_of = {_wrap(f): (f["dataset"] if "dataset" in f.keys() else dataset) for f in fields}
+            same = lambda a, b: ds_of[a] == ds_of[b]          # keep pairs single-dataset (ATOM)
             for a, b in itertools.permutations(wrapped, 2):
-                exprs.append((f"({a}) / ({b})", "s2 a/b"))
+                if same(a, b):
+                    exprs.append((f"({a}) / ({b})", "s2 a/b"))
             for (a, b), w in itertools.product(itertools.combinations(wrapped, 2), PAIR_WINDOWS):
-                exprs.append((f"ts_corr({a}, {b}, {w})", "s2 corr"))
+                if same(a, b):
+                    exprs.append((f"ts_corr({a}, {b}, {w})", "s2 corr"))
     elif kind == "s3":
+        picked = None
         if not base_expr:
             raise ValueError("s3 needs a base expression")
         exprs = [(f"trade_when({c}, {base_expr}, -1)", "s3 condition") for c in CONDITIONS]
@@ -81,7 +109,7 @@ def generate(conn: sqlite3.Connection, catalog: Catalog, account: str, region: s
     for e, why in exprs[:MAX_PER_RUN]:
         chk = check(e, catalog, region)
         problems = list(chk.problems)
-        if kind != "s3" and chk.parsed and chk.datasets and chk.datasets != [dataset]:
+        if kind != "s3" and not picked and chk.parsed and chk.datasets and chk.datasets != [dataset]:
             problems.append(f"datasets {chk.datasets} (expected only {dataset})")
         out.append({"expr": e, "kind": why, "ops": chk.n_ops, "fields": chk.fields, "categories": chk.categories,
                     "datasets": chk.datasets, "problems": problems, "check": chk})

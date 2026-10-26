@@ -48,6 +48,7 @@
   <nav id="tabs">
     <button data-tab="funnel" class="on">Funnel</button>
     <button data-tab="map">Datasets</button>
+    <button data-tab="fields">Fields</button>
     <button data-tab="editor">Editor</button>
     <button data-tab="templates">Templates</button>
   </nav>
@@ -67,6 +68,33 @@
   <section id="tab-map" class="hide">
     <h2>Datasets in this region — what was tried and how it did</h2>
     <div class="scroll"><table id="map"></table></div>
+  </section>
+
+  <section id="tab-fields" class="hide">
+    <h2>Fields — what data this account can use in this region</h2>
+    <div class="pad">
+      <div class="row">
+        <label>dataset <select id="fDataset"><option value="">all</option></select></label>
+        <label>category <select id="fCategory"><option value="">all</option></select></label>
+        <label>type <select id="fType"><option value="">all</option><option>MATRIX</option><option>VECTOR</option></select></label>
+        <label>min coverage <input id="fCov" size="4" value="0.5"></label>
+        <label>search <input id="fQ" size="16" placeholder="name or description"></label>
+        <label>sort <select id="fSort">
+          <option value="alphas">most alphas on BRAIN (proven, crowded)</option>
+          <option value="users">most users</option>
+          <option value="coverage">best coverage</option>
+          <option value="fresh">least used (fresh, coverage ≥ 0.6)</option></select></label>
+        <button id="btnFields">Show</button>
+        <span id="fMsg" class="mute"></span>
+      </div>
+      <div class="row">
+        <span class="mute">ticked: <b id="fPicked">0</b></span>
+        <button id="btnToEditor">Insert into Editor</button>
+        <button id="btnToTpl">Templates on selected</button>
+        <button id="btnClearPick">Clear</button>
+      </div>
+    </div>
+    <div class="scroll"><table id="fieldsTbl"></table></div>
   </section>
 
   <section id="tab-editor" class="hide">
@@ -100,11 +128,17 @@
           <option value="s3">Search 3: trade_when(condition, base, -1)</option></select></label>
         <label>dataset <select id="dataset"></select></label>
         <label>fields <input id="nfields" size="2" value="6"></label>
+        <label>field order <select id="order">
+          <option value="alphas">most alphas (proven)</option>
+          <option value="fresh">least used (fresh)</option>
+          <option value="coverage">best coverage</option></select></label>
         <button id="btnPrev">Preview</button>
         <button id="btnQueue">Queue valid ones</button>
         <span id="tplMsg" class="mute"></span>
       </div>
       <input id="base" class="hide" placeholder="base expression for Search 3" style="font:13px ui-monospace,Menlo,monospace">
+      <div id="pickedLine" class="hide">Using <b id="pickedN"></b> fields picked on the Fields tab instead of the
+        dataset's top fields: <code id="pickedList"></code> <button id="btnUnpick">use dataset top fields instead</button></div>
       <div class="mute">Queued templates join Lane A as fresh ideas (taken round-robin across regions) and get the
         Power Pool, regular and ATOM verdicts like everything else.</div>
     </div>
@@ -148,7 +182,9 @@ async function loadMap() {
     m.rows.map(r => `<tr><td><b>${esc(r.dataset)}</b><div class="mute">${esc(r.name || "")}</div></td><td>${esc(r.category || "")}</td>
       <td>${r.synced ?? "–"}${r.fields ? " / " + r.fields : ""}</td><td>${r.sims || 0}</td><td>${r.best != null && r.sims ? num(r.best) : "–"}</td>
       <td>${r.pp_ok || 0}</td><td>${r.near || 0}</td><td>${r.atom_ok || 0}</td>
-      <td>${r.synced ? `<button data-ds="${esc(r.dataset)}">templates →</button>` : '<span class="mute">not synced yet</span>'}</td></tr>`).join("");
+      <td>${r.synced ? `<button data-fds="${esc(r.dataset)}">fields →</button> <button data-ds="${esc(r.dataset)}">templates →</button>` : '<span class="mute">not synced yet</span>'}</td></tr>`).join("");
+  document.querySelectorAll("[data-fds]").forEach(b => b.onclick = async () => {
+    showTab("fields"); await loadFieldFilters(); $("fDataset").value = b.dataset.fds; loadFields(); });
   document.querySelectorAll("[data-ds]").forEach(b => b.onclick = async () => {
     showTab("templates"); await loadDatasets(); $("dataset").value = b.dataset.ds; });
 }
@@ -177,18 +213,23 @@ async function loadDatasets() {
 function showTab(t) {
   tab = t;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
-  for (const s of ["funnel", "map", "editor", "templates"]) $("tab-" + s).classList.toggle("hide", s !== t);
+  for (const s of ["funnel", "map", "fields", "editor", "templates"]) $("tab-" + s).classList.toggle("hide", s !== t);
   refresh();
 }
 function refresh() {
   if (tab === "funnel") loadFunnel();
   if (tab === "map") loadMap();
+  if (tab === "fields") loadFieldFilters().then(loadFields);
   if (tab === "editor") { $("universe").value ||= UNIVERSE[$("region").value] || ""; loadJobs(); }
-  if (tab === "templates") loadDatasets();
+  if (tab === "templates") { loadDatasets(); setDefaultOrder(); showPicked(); }
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 $("account").onchange = refresh;
-$("region").onchange = () => { $("universe").value = UNIVERSE[$("region").value] || ""; refresh(); };
+$("region").onchange = () => {
+  $("universe").value = UNIVERSE[$("region").value] || "";
+  picked.clear(); tplFields = []; delete $("order").dataset.touched;      // fields belong to one region
+  refresh();
+};
 
 $("btnCheck").onclick = async () => {
   const r = await post("check", {expr: $("expr").value});
@@ -208,7 +249,8 @@ $("btnSim").onclick = async () => {
 };
 
 $("kind").onchange = () => { $("base").classList.toggle("hide", $("kind").value !== "s3"); };
-const tplBody = () => ({kind: $("kind").value, dataset: $("dataset").value, n_fields: Number($("nfields").value), base_expr: $("base").value});
+const tplBody = () => ({kind: $("kind").value, dataset: $("dataset").value, n_fields: Number($("nfields").value),
+                        base_expr: $("base").value, order: $("order").value, fields: tplFields.length ? tplFields : null});
 $("btnPrev").onclick = async () => {
   $("tplMsg").textContent = "generating…";
   const r = await post("templates/preview", tplBody());
@@ -222,6 +264,60 @@ $("btnQueue").onclick = async () => {
   const r = await post("templates/queue", tplBody());
   $("tplMsg").textContent = r.ok ? `${r.queued} new ideas queued for Lane A` : r.error;
 };
+
+
+// ── Fields tab ──────────────────────────────────────────────────────────────
+let picked = new Set(), tplFields = [];
+let filterKey = "";
+async function loadFieldFilters() {
+  const key = $("account").value + "|" + $("region").value;
+  if (key === filterKey) return;
+  filterKey = key;
+  const d = await get("datasets");
+  $("fDataset").innerHTML = '<option value="">all</option>' + d.datasets.filter(x => x.synced).map(x =>
+    `<option value="${esc(x.dataset)}">${esc(x.dataset)} · ${esc(x.category)}</option>`).join("");
+  const f = await get("fields", {sort: "alphas", min_cov: 2});      // categories only (no rows match coverage 2)
+  $("fCategory").innerHTML = '<option value="">all</option>' + f.categories.map(c => `<option>${esc(c)}</option>`).join("");
+}
+async function loadFields() {
+  $("fMsg").textContent = "loading…";
+  const f = await get("fields", {dataset: $("fDataset").value, category: $("fCategory").value, type: $("fType").value,
+                                 min_cov: $("fCov").value, q: $("fQ").value, sort: $("fSort").value});
+  $("fMsg").textContent = `${f.total} fields match, showing ${f.rows.length}`;
+  $("fieldsTbl").innerHTML = "<tr><th></th><th>field</th><th>dataset</th><th>type</th><th>coverage</th><th>users</th><th>alphas</th><th>our sims</th><th>our best</th><th>our PP ok</th><th>description</th></tr>" +
+    f.rows.map(r => `<tr><td><input type="checkbox" data-f="${esc(r.field)}" ${picked.has(r.field) ? "checked" : ""}></td>
+      <td><code>${esc(r.field)}</code>${r.blocked ? ' <span class="pill bad">rejected by BRAIN</span>' : ""}</td>
+      <td>${esc(r.dataset)}<div class="mute">${esc(r.category)}</div></td><td>${esc(r.type)}</td>
+      <td>${num(r.coverage)}</td><td>${r.user_count ?? "–"}</td><td>${r.alpha_count ?? "–"}</td>
+      <td>${r.sims || 0}</td><td>${r.sims ? num(r.best) : "–"}</td><td>${r.pp_ok || 0}</td>
+      <td class="mute">${esc(r.description || "")}</td></tr>`).join("");
+  document.querySelectorAll("[data-f]").forEach(cb => cb.onchange = () => {
+    cb.checked ? picked.add(cb.dataset.f) : picked.delete(cb.dataset.f); $("fPicked").textContent = picked.size; });
+  $("fPicked").textContent = picked.size;
+}
+$("btnFields").onclick = loadFields;
+$("fQ").onkeydown = e => { if (e.key === "Enter") loadFields(); };
+$("btnClearPick").onclick = () => { picked.clear(); loadFields(); };
+$("btnToEditor").onclick = () => {
+  if (!picked.size) return;
+  const ed = $("expr");
+  ed.value = (ed.value ? ed.value.trimEnd() + " " : "") + [...picked].join(", ");
+  showTab("editor"); ed.focus();
+};
+$("btnToTpl").onclick = () => {
+  if (!picked.size) return;
+  tplFields = [...picked]; showTab("templates");
+};
+function showPicked() {
+  $("pickedLine").classList.toggle("hide", !tplFields.length);
+  $("pickedN").textContent = tplFields.length; $("pickedList").textContent = tplFields.join(", ");
+}
+$("btnUnpick").onclick = () => { tplFields = []; showPicked(); };
+function setDefaultOrder() {
+  // USA: our pools are crowded, fresh fields lower correlation; EUR/ASI: start from proven fields
+  if (!$("order").dataset.touched) $("order").value = $("region").value === "USA" ? "fresh" : "alphas";
+}
+$("order").onchange = () => { $("order").dataset.touched = "1"; };
 
 loadMeta().then(refresh);
 setInterval(() => { if (tab === "editor") loadJobs(); }, 15000);

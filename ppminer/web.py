@@ -177,6 +177,10 @@ def search_get(db_path: str, path: str) -> dict:
             return {"jobs": search.manual_jobs(conn, acct)}
         if route == "/api/search/datasets":
             return {"datasets": search.datasets(conn, acct, region)}
+        if route == "/api/search/fields":
+            return search.fields(conn, acct, region, q.get("dataset") or None, q.get("category") or None,
+                                 q.get("type") or None, float(q.get("min_cov") or 0), q.get("q") or None,
+                                 q.get("sort") or "alphas")
         return {"error": f"unknown route {route}"}
     finally:
         conn.close()
@@ -194,7 +198,8 @@ def search_post(db_path: str, path: str, b: dict) -> dict:
             rid = search.queue_manual(conn, acct, region, b["expr"], b.get("settings"))
             return {"ok": True, "job": rid}
         if path in ("/api/search/templates/preview", "/api/search/templates/queue"):
-            args = (conn, acct, region, b["kind"], b.get("dataset"), int(b.get("n_fields") or 6), b.get("base_expr"))
+            args = (conn, acct, region, b["kind"], b.get("dataset"), int(b.get("n_fields") or 6), b.get("base_expr"),
+                    b.get("order") or "coverage", b.get("fields") or None)
             if path.endswith("preview"):
                 rows = search.template_preview(*args)
                 return {"ok": True, "rows": rows, "valid": sum(not r["problems"] for r in rows)}

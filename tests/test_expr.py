@@ -143,3 +143,24 @@ def test_templates_generate_single_dataset_expressions():
     assert any(r["expr"].endswith(", country)") for r in s1)              # multi-country region
     s2 = generate(conn, cat, "A", "EUR", "s2", "ds1", n_fields=3)
     assert any(r["expr"].startswith("ts_corr(") for r in s2) and all(r["datasets"] == ["ds1"] for r in s2)
+
+
+def test_template_field_order_and_picked_fields():
+    import sqlite3
+    from ppminer.catalog import Catalog, FieldInfo
+    from ppminer.templates import generate, top_fields
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+    conn.execute("""create table account_fields (account, region, delay, universe, field, dataset, category, type,
+                    description, coverage, user_count, alpha_count, synced_at)""")
+    rows = [("pop", "d1", 0.9, 300), ("rare", "d1", 0.8, 2), ("sparse", "d1", 0.3, 999), ("other", "d2", 0.95, 50)]
+    cat = Catalog("/nonexistent")
+    for f, ds, cov, alphas in rows:
+        conn.execute("insert into account_fields values ('A','EUR',1,'TOP2500',?,?,'analyst','MATRIX','',?,1,?,null)",
+                     (f, ds, cov, alphas))
+        cat.by_region.setdefault("EUR", {})[f] = FieldInfo(f, "analyst", ds, "MATRIX", "EUR")
+    assert [r["field"] for r in top_fields(conn, "A", "EUR", "d1", 3, "alphas")] == ["pop", "rare"]   # sparse dropped
+    assert [r["field"] for r in top_fields(conn, "A", "EUR", "d1", 3, "fresh")] == ["rare", "pop"]
+    s2 = generate(conn, cat, "A", "EUR", "s2", fields=["pop", "rare", "other"])
+    assert s2 and all("other" not in r["expr"] for r in s2)          # no cross-dataset pairs
+    s1 = generate(conn, cat, "A", "EUR", "s1", fields=["pop", "other"])
+    assert {d for r in s1 for d in r["datasets"]} == {"d1", "d2"} and all(not r["problems"] for r in s1)

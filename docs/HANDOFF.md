@@ -153,7 +153,7 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 | `scheduler.py` | `ppminer daily`: auto-submit after midnight New York, mining cycles for every account in between | scheduling |
 | `markets.py` | Per-region universe and neutralization (EUR, ASI, …) | adding a market |
 | `web.py`, `web.html` | Dashboard: tiles, accounts/login, pick list, auto-submit log, Lane C table, re-simulations | UI work |
-| `search.py`, `search.html` | **Search page** (`/search`): Funnel, Datasets map, Editor (check + queue a simulation, lane M), Templates (preview + queue) | search UI |
+| `search.py`, `search.html` | **Search page** (`/search`): Funnel, Datasets map, Fields (filter and sort a region's fields with our own results per field; tick fields to send to Editor or Templates), Editor (check + queue a simulation, lane M), Templates (preview + queue; field order: most alphas, least used or coverage) | search UI |
 | `db.py` | Main schema; `lanes.migrate()` adds the newer columns/tables | schema changes |
 | `__main__.py` | CLI | adding a command |
 
