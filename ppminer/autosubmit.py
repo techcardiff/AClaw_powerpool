@@ -26,7 +26,7 @@ from .brain import Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
 from .quota import DAILY_SUBMISSION_LIMIT, ny_now, quota
-from .verdict import verdict
+from .verdict import QUALITY_DEFAULTS, quality_gate, verdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(ROOT, "data", "autosubmit.json")
@@ -74,7 +74,7 @@ def _candidates(conn, account: str) -> list[sqlite3.Row]:
         order by case p.status when 'approved' then 0 else 1 end, p.score desc""", (account,)).fetchall()
 
 
-def run_account(conn, catalog: Catalog, account: str, dry_run: bool, min_sharpe: float = 1.0) -> dict:
+def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None) -> dict:
     from .runner import after_batch
     q0 = None
     brain = Brain.from_cookie(ck.load_cookie(account)) if account in ck.saved_accounts() else None
@@ -106,9 +106,10 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, min_sharpe:
         if v != "pp_ok" or ppc != "PASS":
             _log(conn, account, q.today, "skip", aid, cid, f"fresh check: {v} {why} PPC={ppc}")
             continue
-        if (s["sharpe"] or 0) < min_sharpe:
-            # the rule is 1.0; unattended submissions keep a margin for out-of-sample decay
-            _log(conn, account, q.today, "skip", aid, cid, f"sharpe {s['sharpe']} below auto-submit margin {min_sharpe}")
+        low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality)
+        if low:
+            # the Power Pool rule is only sharpe 1.0; income follows quality, so weak alphas wait
+            _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
             continue
         draft = conn.execute("select text from descriptions where candidate_id=?", (cid,)).fetchone()
         text, issues = verified_description(p["expr"], draft[0] if draft else None, catalog, p["region"] or "USA",
@@ -137,6 +138,17 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, min_sharpe:
     return {"status": "done", "submitted": submitted, "tried": tried, "quota_left_before": q0.remaining}
 
 
+def quality_bar(cfg: dict, acfg: dict) -> dict:
+    """Defaults, then the config's "quality" block, then per-account overrides.
+    An old top-level/per-account "min_sharpe" still works."""
+    bar = dict(QUALITY_DEFAULTS, **cfg.get("quality", {}))
+    for src in (cfg, acfg):
+        if "min_sharpe" in src:
+            bar["min_sharpe"] = float(src["min_sharpe"])
+    bar.update(acfg.get("quality", {}))
+    return bar
+
+
 def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force_dry_run: bool = False) -> dict:
     from .db import connect
     cfg = load_config()
@@ -153,5 +165,5 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
             catalog = Catalog(catalog_dir)
             catalog.add_account_fields(conn, account)
             out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
-                                       min_sharpe=float(acfg.get("min_sharpe", cfg.get("min_sharpe", 1.0))))
+                                       quality=quality_bar(cfg, acfg))
     return out

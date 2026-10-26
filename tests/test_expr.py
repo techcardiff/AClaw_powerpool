@@ -85,3 +85,17 @@ def test_description_window_inside_field_name():
     text = ("Idea: 120-day implied volatility skew. Rationale for data used: implied_volatility_call_120 and "
             "implied_volatility_put_120. Rationale for operators used: a 60-day mean.")
     assert rule_issues(expr, text) == []
+
+
+def test_quality_gate_on_real_alphas():
+    import json
+    from ppminer.verdict import quality_gate
+    chk = lambda sub, y2, conc="PASS": json.dumps([{"name": "LOW_SUB_UNIVERSE_SHARPE", "value": sub},
+                                                   {"name": "LOW_2Y_SHARPE", "value": y2},
+                                                   {"name": "CONCENTRATED_WEIGHT", "result": conc}])
+    assert quality_gate(2.16, 2.11, 0.05, chk(1.01, None)) == []          # pwvLrzWv: strong
+    assert quality_gate(2.24, 2.27, 0.05, chk(1.00, 3.52)) == []          # JjPrA2k2: strong
+    weak = quality_gate(1.03, 0.23, 0.57, chk(0.57, 1.48))                # XgRe5ex5: weak
+    assert any("sharpe" in w for w in weak) and any("fitness" in w for w in weak) and any("turnover" in w for w in weak)
+    assert quality_gate(1.42, 1.09, 0.02, chk(0.64, 2.09)) != []          # xA15d0dW: middle, sharpe and sub-universe
+    assert quality_gate(1.42, 1.09, 0.02, chk(0.64, 2.09), {"min_sharpe": 1.3, "min_sub_universe_sharpe": 0.6}) == []

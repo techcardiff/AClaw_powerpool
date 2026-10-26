@@ -98,3 +98,38 @@ def atom_verdict(checks_json: str | None, single_dataset: bool) -> tuple[str, li
         return "not_atom", fails
     pending = [n for n, c in checks.items() if c.get("result") == "PENDING" and n not in NOT_QUALITY]
     return ("pending", pending) if pending else ("atom_ok", [])
+
+
+# ── quality bar for automatic submission ────────────────────────────────────
+# Power Pool income follows the quality of what is submitted, and the pool pays an
+# alpha-count penalty, so auto-submit leaves slots empty rather than fill them with
+# alphas that only just clear the 1.0 Sharpe rule. A value BRAIN did not report never blocks.
+QUALITY_DEFAULTS = {
+    "min_sharpe": 1.5,                 # Power Pool rule is 1.0
+    "min_fitness": 1.0,                # sharpe x sqrt(returns / turnover): after-cost quality
+    "max_turnover": 0.4,               # trading cost
+    "min_2y_sharpe": 1.0,              # the edge is still alive recently
+    "min_sub_universe_sharpe": 0.7,    # not only the most liquid names
+    "concentrated_weight": True,       # CONCENTRATED_WEIGHT must not fail
+}
+
+
+def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict | None = None) -> list[str]:
+    """Reasons an alpha falls below the auto-submit quality bar ([] = passes)."""
+    b = dict(QUALITY_DEFAULTS, **(bar or {}))
+    checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
+    val = lambda n: (checks.get(n) or {}).get("value")
+    out = []
+    if sharpe is not None and sharpe < b["min_sharpe"]:
+        out.append(f"sharpe {sharpe} < {b['min_sharpe']}")
+    if fitness is not None and fitness < b["min_fitness"]:
+        out.append(f"fitness {fitness} < {b['min_fitness']}")
+    if turnover is not None and turnover > b["max_turnover"]:
+        out.append(f"turnover {turnover} > {b['max_turnover']}")
+    if (v := val("LOW_2Y_SHARPE")) is not None and v < b["min_2y_sharpe"]:
+        out.append(f"last-2y sharpe {v} < {b['min_2y_sharpe']}")
+    if (v := val("LOW_SUB_UNIVERSE_SHARPE")) is not None and v < b["min_sub_universe_sharpe"]:
+        out.append(f"sub-universe sharpe {v} < {b['min_sub_universe_sharpe']}")
+    if b["concentrated_weight"] and (checks.get("CONCENTRATED_WEIGHT") or {}).get("result") == "FAIL":
+        out.append("concentrated weight")
+    return out

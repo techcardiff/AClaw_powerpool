@@ -1,11 +1,28 @@
 {
-  "_comment": "Copy to data/autosubmit.json. dry_run=true picks and verifies but never submits. Only the scheduler submits.",
+  "_comment": "Copy to data/autosubmit.json. dry_run=true picks and verifies but never submits. Only the scheduler submits. 'quality' is the auto-submit bar (stricter than the Power Pool rule); per-account 'quality' overrides it.",
   "start_after_ny": "00:30",
   "retry_hours": 3,
-  "min_sharpe": 1.15,
-  "regions": ["USA", "EUR", "ASI"],
+  "regions": [
+    "USA",
+    "EUR",
+    "ASI"
+  ],
   "accounts": {
-    "HT52122": {"enabled": true, "dry_run": true},
-    "YO50689": {"enabled": true, "dry_run": true}
+    "HT52122": {
+      "enabled": true,
+      "dry_run": true
+    },
+    "YO50689": {
+      "enabled": true,
+      "dry_run": true
+    }
+  },
+  "quality": {
+    "min_sharpe": 1.5,
+    "min_fitness": 1.0,
+    "max_turnover": 0.4,
+    "min_2y_sharpe": 1.0,
+    "min_sub_universe_sharpe": 0.7,
+    "concentrated_weight": true
   }
 }
