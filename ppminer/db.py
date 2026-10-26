@@ -84,7 +84,7 @@ create table if not exists rewrites (
 
 
 def connect(path: str) -> sqlite3.Connection:
-    c = sqlite3.connect(path, timeout=30)
+    c = sqlite3.connect(path, timeout=120)        # scheduler, field syncs and dashboard share one file
     c.row_factory = sqlite3.Row
     c.execute("pragma journal_mode=wal")
     c.executescript(SCHEMA)
