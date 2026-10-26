@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alpha Search</title>
+<style>
+  :root { --bg:#f7f7f5; --panel:#fff; --ink:#1d1d1b; --mute:#6b6b66; --line:#e3e3de;
+          --ok:#1f7a4d; --bad:#b3261e; --warn:#9a6700; --run:#2459a6; --bar:#2459a6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --panel:#1f1f1d; --ink:#ecece8; --mute:#9a9a93; --line:#33332f;
+            --ok:#4cc38a; --bad:#ff8a80; --warn:#e0b252; --run:#7aa7f0; --bar:#7aa7f0; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system,system-ui,sans-serif }
+  header { padding:14px 24px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; border-bottom:1px solid var(--line) }
+  h1 { font-size:18px; margin:0 } .mute { color:var(--mute) } a { color:var(--run) }
+  main { padding:16px 24px; display:grid; gap:16px }
+  nav { display:flex; gap:6px; flex-wrap:wrap }
+  nav button.on { border-color:var(--ink); font-weight:600 }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden }
+  section h2 { font-size:14px; margin:0; padding:10px 14px; border-bottom:1px solid var(--line) }
+  .pad { padding:12px 14px; display:grid; gap:10px }
+  .scroll { overflow-x:auto }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums }
+  th, td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); vertical-align:top }
+  th { color:var(--mute); font-weight:500; font-size:12px }
+  code { font:12px ui-monospace,Menlo,monospace; word-break:break-all }
+  .pill { font-size:12px; padding:1px 8px; border-radius:10px; border:1px solid currentColor; white-space:nowrap }
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--warn)} .run{color:var(--run)}
+  button, select, input, textarea { font:inherit; padding:5px 10px; border-radius:6px; border:1px solid var(--line);
+                                    background:var(--bg); color:var(--ink) }
+  button { cursor:pointer } button:hover { border-color:var(--mute) }
+  textarea { width:100%; font:13px ui-monospace,Menlo,monospace; min-height:70px }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center }
+  .row label { display:flex; gap:6px; align-items:center; color:var(--mute); font-size:13px }
+  .stage { display:grid; grid-template-columns:170px 1fr 70px; gap:10px; align-items:center; padding:3px 0 }
+  .bar { height:14px; background:var(--bar); border-radius:3px; min-width:2px }
+  .hide { display:none }
+  details summary { cursor:pointer; color:var(--mute) }
+</style>
+</head>
+<body>
+<header>
+  <h1>Alpha Search</h1>
+  <label class="mute">account <select id="account"></select></label>
+  <label class="mute">region <select id="region"></select></label>
+  <nav id="tabs">
+    <button data-tab="funnel" class="on">Funnel</button>
+    <button data-tab="map">Datasets</button>
+    <button data-tab="editor">Editor</button>
+    <button data-tab="templates">Templates</button>
+  </nav>
+  <a href="/">← dashboard</a>
+</header>
+<main>
+  <section id="tab-funnel">
+    <h2>Funnel — where ideas drop out</h2>
+    <div class="pad">
+      <div id="stages" class="mute">loading…</div>
+      <div><b>What blocks regular / ATOM</b> <span class="mute">(failing checks among results with Sharpe ≥ 1)</span>
+        <div id="blocks" class="mute"></div></div>
+      <details><summary>simulations by lane / purpose</summary><div id="bylane"></div></details>
+    </div>
+  </section>
+
+  <section id="tab-map" class="hide">
+    <h2>Datasets in this region — what was tried and how it did</h2>
+    <div class="scroll"><table id="map"></table></div>
+  </section>
+
+  <section id="tab-editor" class="hide">
+    <h2>Editor — check and simulate an expression</h2>
+    <div class="pad">
+      <textarea id="expr" placeholder="e.g. group_rank(ts_zscore(ts_backfill(anl4_eps_mean, 60), 60), industry)"></textarea>
+      <div class="row">
+        <label>universe <input id="universe" size="9"></label>
+        <label>neutralization <select id="neutralization">
+          <option>SUBINDUSTRY</option><option>INDUSTRY</option><option>SECTOR</option><option>MARKET</option><option>NONE</option></select></label>
+        <label>decay <input id="decay" size="3" value="4"></label>
+        <label>truncation <input id="truncation" size="4" value="0.08"></label>
+        <button id="btnCheck">Check</button>
+        <button id="btnSim">Simulate</button>
+        <span id="edMsg" class="mute"></span>
+      </div>
+      <div id="checkOut" class="mute"></div>
+      <div class="mute">Simulations are queued for the scheduler and run first in this account's next batch
+        (usually within ~10 minutes). Nothing is ever submitted from here.</div>
+    </div>
+    <div class="scroll"><table id="jobs"></table></div>
+  </section>
+
+  <section id="tab-templates" class="hide">
+    <h2>Templates — Alpha Studio Search 1 / 2 / 3</h2>
+    <div class="pad">
+      <div class="row">
+        <label>type <select id="kind">
+          <option value="s1">Search 1: ts_op(field) and group_rank</option>
+          <option value="s2">Search 2: field A/B pairs (A/B, ts_corr)</option>
+          <option value="s3">Search 3: trade_when(condition, base, -1)</option></select></label>
+        <label>dataset <select id="dataset"></select></label>
+        <label>fields <input id="nfields" size="2" value="6"></label>
+        <button id="btnPrev">Preview</button>
+        <button id="btnQueue">Queue valid ones</button>
+        <span id="tplMsg" class="mute"></span>
+      </div>
+      <input id="base" class="hide" placeholder="base expression for Search 3" style="font:13px ui-monospace,Menlo,monospace">
+      <div class="mute">Queued templates join Lane A as fresh ideas (taken round-robin across regions) and get the
+        Power Pool, regular and ATOM verdicts like everything else.</div>
+    </div>
+    <div class="scroll"><table id="tpl"></table></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const num = (v, d=2) => v == null ? "–" : Number(v).toFixed(d);
+const get = (route, extra = {}) => fetch(`/api/search/${route}?` + new URLSearchParams({account: $("account").value, region: $("region").value, ...extra})).then(r => r.json());
+const post = (route, body) => fetch(`/api/search/${route}`, {method: "POST",
+  headers: {"Content-Type": "application/json", "X-PP-Dashboard": "1"},
+  body: JSON.stringify({account: $("account").value, region: $("region").value, ...body})}).then(r => r.json());
+const UNIVERSE = {USA: "TOP3000", EUR: "TOP2500", ASI: "MINVOL1M", GLB: "TOP3000"};
+const pill = (v, map) => { const m = map[v] || ["mute", v]; return `<span class="pill ${m[0]}">${esc(m[1])}</span>`; };
+const PP = {pp_ok: ["ok", "PP ok"], risky: ["warn", "PP risky"], pending: ["run", "PP pending"], not_pp: ["bad", "not PP"]};
+const REG = {reg_ok: ["ok", "regular ok"], near: ["warn", "regular near"], pending: ["run", "regular pending"], fail: ["bad", "regular fail"]};
+const ATOM = {atom_ok: ["ok", "ATOM ok"], pending: ["run", "ATOM pending"], not_atom: ["mute", "not ATOM"]};
+let tab = "funnel";
+
+async function loadMeta() {
+  const m = await get("meta");
+  $("account").innerHTML = m.accounts.map(a => `<option>${esc(a)}</option>`).join("");
+  $("region").innerHTML = m.regions.map(r => `<option>${esc(r)}</option>`).join("");
+}
+
+async function loadFunnel() {
+  const f = await get("funnel");
+  const max = Math.max(1, ...f.stages.map(s => s[1]));
+  $("stages").innerHTML = f.stages.map(([k, v]) => `<div class="stage"><span>${esc(k)}</span>
+    <div class="bar" style="width:${Math.max(0.3, 100 * v / max)}%"></div><b>${v}</b></div>`).join("");
+  $("blocks").innerHTML = f.blocking_checks.length
+    ? f.blocking_checks.map(([k, v]) => `<span class="pill warn">${esc(k)} · ${v}</span>`).join(" ") : "none yet";
+  $("bylane").innerHTML = f.by_lane.map(([k, v]) => `${esc(k)}: ${v}`).join("<br>");
+}
+
+async function loadMap() {
+  const m = await get("map");
+  $("map").innerHTML = "<tr><th>dataset</th><th>category</th><th>fields synced</th><th>sims</th><th>best sharpe</th><th>PP ok</th><th>regular near</th><th>ATOM ok</th><th></th></tr>" +
+    m.rows.map(r => `<tr><td><b>${esc(r.dataset)}</b><div class="mute">${esc(r.name || "")}</div></td><td>${esc(r.category || "")}</td>
+      <td>${r.synced ?? "–"}${r.fields ? " / " + r.fields : ""}</td><td>${r.sims || 0}</td><td>${r.best != null && r.sims ? num(r.best) : "–"}</td>
+      <td>${r.pp_ok || 0}</td><td>${r.near || 0}</td><td>${r.atom_ok || 0}</td>
+      <td>${r.synced ? `<button data-ds="${esc(r.dataset)}">templates →</button>` : '<span class="mute">not synced yet</span>'}</td></tr>`).join("");
+  document.querySelectorAll("[data-ds]").forEach(b => b.onclick = async () => {
+    showTab("templates"); await loadDatasets(); $("dataset").value = b.dataset.ds; });
+}
+
+async function loadJobs() {
+  const j = await get("jobs");
+  $("jobs").innerHTML = j.jobs.length
+    ? "<tr><th>job</th><th>status</th><th>sharpe</th><th>fitness</th><th>TO</th><th>verdicts</th><th>expression / settings</th></tr>" +
+      j.jobs.map(x => `<tr><td>#${x.id}<div class="mute">${esc(x.alpha_id || "")}</div></td>
+        <td>${pill(x.status, {queued: ["run", "queued"], running: ["run", "running"], done: ["ok", "done"], error: ["bad", "error"]})}</td>
+        <td><b>${num(x.sharpe)}</b></td><td>${num(x.fitness)}</td><td>${num(x.turnover)}</td>
+        <td>${x.status === "done" ? pill(x.pp, PP) + " " + pill(x.regular, REG) + " " + pill(x.atom, ATOM) +
+              (x.fails && x.fails.length ? `<div class="mute">fails: ${esc(x.fails.join(", "))}</div>` : "") : ""}
+            ${x.error ? `<div class="bad">${esc(x.error.replace(/<[^>]+>/g, ""))}</div>` : ""}</td>
+        <td><code>${esc(x.expr)}</code><div class="mute">${esc(Object.entries(x.settings).map(([k, v]) => k + " " + v).join(" · "))}</div>
+          ${x.checks ? `<details><summary>all checks</summary>${x.checks.map(c => `${esc(c[0])}: ${esc(c[1])}${c[2] != null ? " " + esc(c[2]) : ""}${c[3] != null ? " (limit " + esc(c[3]) + ")" : ""}`).join("<br>")}</details>` : ""}</td></tr>`).join("")
+    : '<tr><td class="mute">No manual simulations for this account yet.</td></tr>';
+}
+
+async function loadDatasets() {
+  const d = await get("datasets");
+  $("dataset").innerHTML = d.datasets.filter(x => x.synced).map(x =>
+    `<option value="${esc(x.dataset)}">${esc(x.dataset)} · ${esc(x.category)} · ${x.synced} fields</option>`).join("");
+}
+
+function showTab(t) {
+  tab = t;
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === t));
+  for (const s of ["funnel", "map", "editor", "templates"]) $("tab-" + s).classList.toggle("hide", s !== t);
+  refresh();
+}
+function refresh() {
+  if (tab === "funnel") loadFunnel();
+  if (tab === "map") loadMap();
+  if (tab === "editor") { $("universe").value ||= UNIVERSE[$("region").value] || ""; loadJobs(); }
+  if (tab === "templates") loadDatasets();
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+$("account").onchange = refresh;
+$("region").onchange = () => { $("universe").value = UNIVERSE[$("region").value] || ""; refresh(); };
+
+$("btnCheck").onclick = async () => {
+  const r = await post("check", {expr: $("expr").value});
+  $("checkOut").innerHTML = !r.ok ? `<span class="bad">${esc(r.error)}</span>` :
+    `${r.parsed ? "" : '<span class="bad">does not parse</span> '}operators <b>${r.ops}</b> · fields ${esc(r.fields.join(", ") || "–")}
+     · categories ${esc(r.categories.join(", ") || "–")} · datasets ${esc(r.datasets.join(", ") || "–")}
+     ${r.pp_shape ? '<span class="pill ok">Power Pool shape</span>' : '<span class="pill warn">not Power Pool shape</span>'}
+     ${r.datasets.length === 1 ? '<span class="pill ok">single dataset (ATOM possible)</span>' : ""}
+     ${r.problems.length ? `<div class="warn">${esc(r.problems.join("; "))}</div>` : ""}`;
+};
+$("btnSim").onclick = async () => {
+  const settings = {universe: $("universe").value, neutralization: $("neutralization").value,
+                    decay: Number($("decay").value), truncation: Number($("truncation").value)};
+  const r = await post("simulate", {expr: $("expr").value, settings});
+  $("edMsg").textContent = r.ok ? `queued as job #${r.job}` : r.error;
+  loadJobs();
+};
+
+$("kind").onchange = () => { $("base").classList.toggle("hide", $("kind").value !== "s3"); };
+const tplBody = () => ({kind: $("kind").value, dataset: $("dataset").value, n_fields: Number($("nfields").value), base_expr: $("base").value});
+$("btnPrev").onclick = async () => {
+  $("tplMsg").textContent = "generating…";
+  const r = await post("templates/preview", tplBody());
+  if (!r.ok) { $("tplMsg").textContent = r.error; return; }
+  $("tplMsg").textContent = `${r.rows.length} expressions, ${r.valid} valid`;
+  $("tpl").innerHTML = "<tr><th>type</th><th>ops</th><th>expression</th><th>check</th></tr>" + r.rows.map(x =>
+    `<tr><td>${esc(x.kind)}</td><td>${x.ops}</td><td><code>${esc(x.expr)}</code></td>
+     <td>${x.problems.length ? `<span class="bad">${esc(x.problems.join("; "))}</span>` : '<span class="ok">ok</span>'}</td></tr>`).join("");
+};
+$("btnQueue").onclick = async () => {
+  const r = await post("templates/queue", tplBody());
+  $("tplMsg").textContent = r.ok ? `${r.queued} new ideas queued for Lane A` : r.error;
+};
+
+loadMeta().then(refresh);
+setInterval(() => { if (tab === "editor") loadJobs(); }, 15000);
+</script>
+</body>
+</html>

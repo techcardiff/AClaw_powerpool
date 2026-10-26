@@ -18,7 +18,8 @@ import time
 from . import autosubmit, lanes
 from .catalog import Catalog
 from .quota import ny_now
-from .runner import LOGIN_POLL_SECONDS, cycle, log
+from .fields import sync_step
+from .runner import LOGIN_POLL_SECONDS, _brain, cycle, log
 
 
 def _due(conn, account: str, cfg: dict) -> bool:
@@ -41,7 +42,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8,
     lanes.migrate(conn)
     # jobs left 'queued'/'running' by a previous scheduler process can never finish
     # (the process that would record them is gone); free their candidates
-    n = conn.execute("delete from resims where status in ('queued','running')").rowcount
+    n = conn.execute("delete from resims where status='running' or (status='queued' and coalesce(lane,'')<>'M')").rowcount
     conn.commit()
     t_end = time.time() + hours * 3600
     log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
@@ -62,6 +63,17 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8,
                         lanes.set_state(conn, **{f"autosubmit:{account}": ny_now().isoformat()})
                 except Exception as e:
                     log(f"[{account}] autosubmit error: {e}")
+        for account in accounts:          # field catalogs: a few datasets per region per pass
+            b = _brain(account)
+            if b is None:
+                continue
+            for region in regions:
+                try:
+                    st = sync_step(conn, b, account, region)
+                    if st["done"]:
+                        log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
+                except Exception as e:
+                    log(f"[{account}] fields {region}: {e}")
         waiting = 0
         for account in accounts:
             catalog = Catalog(catalog_dir)

@@ -50,24 +50,23 @@ def _enqueue(conn, account, lane, purpose, cand_id, expr, settings, parent=None)
 
 
 def build_batch(conn, account: str, size: int, c_share: float, others: list[str] = ()) -> list[int]:
+    from . import funnel
+    # manual jobs from the Search page run first, in the order they were queued
+    ids = [r[0] for r in conn.execute("""select id from resims where account=? and status='queued' and lane='M'
+                                          order by id limit ?""", (account, size))]
+    size -= len(ids)
+    if size <= 0:
+        return ids
     n_c = max(1, round(size * c_share))
     rows_a = lanes.lane_a(conn, account, size - n_c, others)
-    ids = []
     for r in rows_a:
-        purpose = {"explore": "explore", "rewrite": "rewrite"}.get(r["status"], "harvest")
+        purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
-    room = size - len(ids)
-    # Lane C part 1: settings sweeps for near misses (one parent per cycle)
-    for parent in lanes.near_misses(conn, account):
-        _, fails = regular_verdict(parent["checks"])
-        tried = lanes.tried_settings(conn, account, parent["candidate_id"], parent["expr"])
-        variants = lanes.tune_variants(json.loads(parent["settings"]), fails, k=min(3, room), tried=tried)
-        if not variants:
-            continue          # e.g. only self-correlation fails: no setting can fix that
-        for why, st in variants:
-            ids.append(_enqueue(conn, account, "C", f"tune: {why}", parent["candidate_id"], parent["expr"], st, parent["id"]))
-            room -= 1
-        break                 # one parent per cycle
+    room = size - len([r for r in rows_a])
+    # Lane C part 1: the tiered funnel fixes the failing check of the best near miss
+    for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room)):
+        ids.append(_enqueue(conn, account, "C", purpose, cid, expr, st, parent))
+        room -= 1
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
     in_batch = {r["id"] for r in rows_a}
     for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch), others):
@@ -232,7 +231,8 @@ def run(db_path: str, catalog_dir: str, account: str, hours: float, max_sims: in
     lanes.migrate(conn)
     catalog = Catalog(catalog_dir)
     catalog.add_account_fields(conn, account)
-    conn.execute("delete from resims where account=? and status in ('queued','running')", (account,))  # stale from a crash
+    conn.execute("delete from resims where account=? and (status='running' or (status='queued' and coalesce(lane,'')<>'M'))",
+                 (account,))  # stale from a crash; queued manual jobs are kept
     conn.commit()
     t_end, sims, synced = time.time() + hours * 3600, 0, False
     log(f"runner start: account {account}, {hours}h, max {max_sims} sims, batch {batch}, Lane C share {c_share}, "

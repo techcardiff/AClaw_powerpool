@@ -109,3 +109,37 @@ def test_tune_variants_skip_tried_and_prefer_liquid_universe():
     tried = [s for _, s in v]
     again = tune_variants(base, ["LOW_SUB_UNIVERSE_SHARPE"], k=3, tried=tried)
     assert all(s not in tried for _, s in again)
+
+
+def test_funnel_fixes_target_the_failing_check():
+    from ppminer.funnel import fixes
+    s = {"universe": "TOP3000", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
+    out = fixes("rank(x)", s, ["LOW_SUB_UNIVERSE_SHARPE"], {})
+    whys = [w for w, _, _ in out]
+    assert whys[0].startswith("liquidity: neutralize within size buckets")
+    assert any(st.get("universe") == "TOP1000" for _, _, st in out)
+    assert fixes("rank(x)", s, ["SELF_CORRELATION", "LOW_SUB_UNIVERSE_SHARPE"], {}) == []
+    faded = {"LOW_2Y_SHARPE": {"result": "FAIL", "value": 0.3}}
+    assert fixes("rank(x)", s, ["LOW_SUB_UNIVERSE_SHARPE"], faded) == []
+    conc = fixes("x", s, ["CONCENTRATED_WEIGHT"], {})
+    assert conc[0][1] == "rank(x)" and any(st.get("truncation") == 0.05 for _, _, st in conc)
+
+
+def test_templates_generate_single_dataset_expressions():
+    import sqlite3
+    from ppminer.catalog import Catalog, FieldInfo
+    from ppminer.templates import generate
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+    conn.execute("""create table account_fields (account, region, delay, universe, field, dataset, category, type,
+                    description, coverage, user_count, alpha_count, synced_at)""")
+    for f, cov in (("eps_a", 0.95), ("eps_b", 0.5), ("eps_c", 0.99)):
+        conn.execute("insert into account_fields values ('A','EUR',1,'TOP2500',?,'ds1','analyst','MATRIX','',?,1,1,null)", (f, cov))
+    cat = Catalog("/nonexistent")
+    for f in ("eps_a", "eps_b", "eps_c"):
+        cat.by_region.setdefault("EUR", {})[f] = FieldInfo(f, "analyst", "ds1", "MATRIX", "EUR")
+    s1 = generate(conn, cat, "A", "EUR", "s1", "ds1", n_fields=3)
+    assert s1 and all(not r["problems"] for r in s1)
+    assert any("ts_backfill(eps_b, 60)" in r["expr"] for r in s1)          # sparse field backfilled
+    assert any(r["expr"].endswith(", country)") for r in s1)              # multi-country region
+    s2 = generate(conn, cat, "A", "EUR", "s2", "ds1", n_fields=3)
+    assert any(r["expr"].startswith("ts_corr(") for r in s2) and all(r["datasets"] == ["ds1"] for r in s2)

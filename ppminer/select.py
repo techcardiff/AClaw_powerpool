@@ -23,7 +23,7 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
     With an account, only alphas whose fields that account can use are picked."""
     from .fields import available
     q = f"""select * from candidates where status in ({','.join('?' * len(statuses))})
-            and (family_rank = 1 or status in ('rewrite', 'explore'))
+            and (family_rank = 1 or status in ('rewrite', 'explore', 'template'))
             order by single_dataset desc, abs(coalesce(sharpe, 0)) desc, id"""
     done = set()
     if account and skip_done:

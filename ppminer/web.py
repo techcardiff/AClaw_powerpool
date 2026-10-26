@@ -152,6 +152,58 @@ def telegram_login(account: str) -> dict:
     return {"ok": True}
 
 
+def _q(path: str) -> dict:
+    from urllib.parse import parse_qs, urlparse
+    return {k: v[0] for k, v in parse_qs(urlparse(path).query).items()}
+
+
+def search_get(db_path: str, path: str) -> dict:
+    from . import autosubmit, search
+    q = _q(path)
+    route = path.split("?")[0]
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        acct, region = q.get("account", ""), q.get("region", "USA")
+        if route == "/api/search/meta":
+            cfg = autosubmit.load_config()
+            return {"accounts": [a for a, c in cfg.get("accounts", {}).items() if c.get("enabled")],
+                    "regions": cfg.get("regions", ["USA"])}
+        if route == "/api/search/funnel":
+            return search.funnel(conn, acct, q.get("region") or None)
+        if route == "/api/search/map":
+            return {"rows": search.dataset_map(conn, acct, region)}
+        if route == "/api/search/jobs":
+            return {"jobs": search.manual_jobs(conn, acct)}
+        if route == "/api/search/datasets":
+            return {"datasets": search.datasets(conn, acct, region)}
+        return {"error": f"unknown route {route}"}
+    finally:
+        conn.close()
+
+
+def search_post(db_path: str, path: str, b: dict) -> dict:
+    from . import search
+    from .db import connect
+    conn = connect(db_path)
+    try:
+        acct, region = b.get("account", ""), b.get("region", "USA")
+        if path == "/api/search/check":
+            return {"ok": True, **search.check_expr(conn, acct, region, b["expr"])}
+        if path == "/api/search/simulate":
+            rid = search.queue_manual(conn, acct, region, b["expr"], b.get("settings"))
+            return {"ok": True, "job": rid}
+        if path in ("/api/search/templates/preview", "/api/search/templates/queue"):
+            args = (conn, acct, region, b["kind"], b.get("dataset"), int(b.get("n_fields") or 6), b.get("base_expr"))
+            if path.endswith("preview"):
+                rows = search.template_preview(*args)
+                return {"ok": True, "rows": rows, "valid": sum(not r["problems"] for r in rows)}
+            return {"ok": True, "queued": search.template_queue(*args)}
+        return {"ok": False, "error": f"unknown route {path}"}
+    finally:
+        conn.close()
+
+
 def serve(db_path: str, port: int = 5070) -> None:
     page = open(os.path.join(HERE, "web.html"), "rb").read()
 
@@ -170,6 +222,10 @@ def serve(db_path: str, port: int = 5070) -> None:
                 self._send(json.dumps(login_status("force" in self.path)).encode())
             elif self.path in ("/", "/index.html"):
                 self._send(page, "text/html; charset=utf-8")
+            elif self.path == "/search":
+                self._send(open(os.path.join(HERE, "search.html"), "rb").read(), "text/html; charset=utf-8")
+            elif self.path.startswith("/api/search/"):
+                self._send(json.dumps(search_get(db_path, self.path), default=str).encode())
             else:
                 self.send_error(404)
 
@@ -188,6 +244,8 @@ def serve(db_path: str, port: int = 5070) -> None:
                     out = {"ok": True, "saved": grab()}
                 elif self.path == "/api/login/telegram":
                     out = telegram_login(body.get("account", ""))
+                elif self.path.startswith("/api/search/"):
+                    out = search_post(db_path, self.path, body)
                 elif self.path == "/api/pick/decide":
                     from .picks import decide
                     conn = sqlite3.connect(db_path, timeout=30)

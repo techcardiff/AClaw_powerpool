@@ -121,7 +121,7 @@ def submitted_exprs(conn: sqlite3.Connection, account: str) -> set[str]:
 
 
 # ── Lane A ──────────────────────────────────────────────────────────────────
-LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore")
+LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore", "template")
 
 
 def other_accounts(conn: sqlite3.Connection, account: str, others: list[str]) -> tuple[set[int], set[str], set[str]]:

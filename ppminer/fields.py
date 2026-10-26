@@ -97,3 +97,61 @@ def block(conn: sqlite3.Connection, account: str, field: str, reason: str) -> No
     ensure(conn)
     conn.execute("insert or replace into field_blocklist(account, field, reason) values (?,?,?)", (account, field, reason))
     conn.commit()
+
+
+# ── resumable sync (run by the scheduler a few datasets at a time) ──────────
+PROGRESS = """
+create table if not exists field_sync_progress (
+    account text, region text, delay integer, universe text, dataset text,
+    n_fields integer, synced_at timestamp default current_timestamp,
+    primary key (account, region, delay, universe, dataset));
+"""
+REFRESH_DAYS = 14
+
+
+def sync_step(conn: sqlite3.Connection, brain: Brain, account: str, region: str, delay: int = 1,
+              universe: str | None = None, max_datasets: int = 6) -> dict:
+    """Sync up to max_datasets more datasets for one account/region and remember progress.
+    Never deletes what is already there, so an expired session or a busy database only
+    means it continues on the next pass. Returns {'done', 'remaining'}."""
+    from . import markets
+    ensure(conn)
+    conn.executescript(PROGRESS)
+    universe = universe or markets.universe(region)
+    base = dict(instrumentType="EQUITY", region=region, delay=delay, universe=universe)
+    have = conn.execute("""select count(*), max(synced_at) < datetime('now', ?) from account_datasets
+                           where account=? and region=? and delay=? and universe=?""",
+                        (f"-{REFRESH_DAYS} days", account, region, delay, universe)).fetchone()
+    if not have[0] or have[1]:
+        for d in _pages(brain, "data-sets", base):
+            conn.execute("insert or replace into account_datasets values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)",
+                         (account, region, delay, universe, d["id"], d.get("name"), _cat(d), d.get("fieldCount"),
+                          d.get("userCount"), d.get("alphaCount"), d.get("coverage"), d.get("valueScore"),
+                          d.get("pyramidMultiplier"), json.dumps(d.get("themes") or [])))
+        conn.commit()
+    # datasets synced before progress was tracked count as done (no refetch of 76k USA fields)
+    conn.execute("""insert or ignore into field_sync_progress(account, region, delay, universe, dataset, n_fields)
+                    select account, region, delay, universe, dataset, count(*) from account_fields
+                    where account=? and region=? and delay=? and universe=? group by dataset""",
+                 (account, region, delay, universe))
+    conn.commit()
+    todo = [r[0] for r in conn.execute("""
+        select d.dataset from account_datasets d where d.account=? and d.region=? and d.delay=? and d.universe=?
+          and not exists (select 1 from field_sync_progress p where p.account=d.account and p.region=d.region
+                          and p.delay=d.delay and p.universe=d.universe and p.dataset=d.dataset
+                          and p.synced_at > datetime('now', ?))
+        order by coalesce(d.value_score, 0) desc""", (account, region, delay, universe, f"-{REFRESH_DAYS} days"))]
+    done = 0
+    for ds in todo[:max_datasets]:
+        cat = conn.execute("select category from account_datasets where account=? and region=? and dataset=?",
+                           (account, region, ds)).fetchone()[0]
+        fields = list(_pages(brain, "data-fields", {**base, "dataset.id": ds}))
+        for f in fields:
+            conn.execute("insert or replace into account_fields values (?,?,?,?,?,?,?,?,?,?,?,?,current_timestamp)",
+                         (account, region, delay, universe, f["id"], ds, cat, f.get("type"),
+                          f.get("description"), f.get("coverage"), f.get("userCount"), f.get("alphaCount")))
+        conn.execute("insert or replace into field_sync_progress values (?,?,?,?,?,?,current_timestamp)",
+                     (account, region, delay, universe, ds, len(fields)))
+        conn.commit()
+        done += 1
+    return {"done": done, "remaining": max(0, len(todo) - done)}
