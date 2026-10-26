@@ -88,6 +88,7 @@ class Telegram:
         return d["result"]
 
     def send(self, chat_id, text: str, button: tuple[str, str] | None = None) -> dict:
+        _log(f"-> chat {chat_id}: {text.splitlines()[0][:120]}{' [+button]' if button else ''}")
         params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
         if button:
             params["reply_markup"] = {"inline_keyboard": [[{"text": button[0], "url": button[1]}]]}
@@ -95,6 +96,10 @@ class Telegram:
 
     def updates(self, offset: int | None, timeout: int = 30) -> list[dict]:
         return self.call("getUpdates", offset=offset, timeout=timeout, allowed_updates=["message"])
+
+
+def _log(msg: str) -> None:
+    print(time.strftime("%m-%d %H:%M:%S"), msg, flush=True)
 
 
 def _hours(sec) -> str:
@@ -108,7 +113,7 @@ class Broker:
         self.tg = tg or Telegram(cfg["bot_token"])
         self.http_factory, self.now, self.sleep = http_factory, now, sleep
         self.lock = threading.Lock()
-        self.running: set[str] = set()             # accounts with a login in progress
+        self.running: dict[str, float] = {}        # account -> start time of the login in progress
         self.last_prompt: dict[str, float] = {}
         self.logged_out: set[str] = set()          # accounts we already sent a logout notice for
 
@@ -121,15 +126,29 @@ class Broker:
 
     # ── one login ───────────────────────────────────────────────────────────
     def login(self, account: str, reason: str = "") -> bool:
+        stale_after = (self.cfg["scan_wait_minutes"] + 5) * 60
         with self.lock:
-            if account in self.running:
+            started = self.running.get(account)
+            if started is not None and self.now() - started < stale_after:
+                _log(f"{account}: login already in progress ({reason})")
+                if reason == "requested":
+                    self.tg.send(self.cfg["accounts"][account]["chat_id"],
+                                 f"⏳ {account}: a login is already in progress; use the last Verify face button.")
                 return False
-            self.running.add(account)
+            if started is not None:
+                _log(f"{account}: previous login attempt looks stuck, starting a new one")
+            self.running[account] = self.now()
+        _log(f"{account}: login started ({reason})")
         try:
-            return self._login(account, reason)
+            ok = self._login(account, reason)
+            _log(f"{account}: login {'succeeded' if ok else 'did not complete'}")
+            return ok
+        except Exception as e:
+            _log(f"{account}: login error: {e}")
+            raise
         finally:
             with self.lock:
-                self.running.discard(account)
+                self.running.pop(account, None)
 
     def _login(self, account: str, reason: str) -> bool:
         a = self.cfg["accounts"][account]
@@ -198,8 +217,9 @@ class Broker:
             return []
         started = []
         for account in self.cfg["accounts"]:
-            if account in self.running:
-                continue
+            began = self.running.get(account)
+            if began is not None and self.now() - began < (self.cfg["scan_wait_minutes"] + 5) * 60:
+                continue                             # a login is in progress (stuck ones expire, see login())
             reason = self.needs_login(account)
             if reason is None:
                 self.logged_out.discard(account)
@@ -230,6 +250,7 @@ class Broker:
     def handle(self, msg: dict) -> None:
         chat = msg["chat"]["id"]
         text = (msg.get("text") or "").strip()
+        _log(f"<- chat {chat}: {text[:60]}")
         cmd, _, arg = text.partition(" ")
         cmd = cmd.split("@")[0].lower()
         if cmd in ("/start", "/id"):

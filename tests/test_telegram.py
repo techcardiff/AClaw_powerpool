@@ -181,3 +181,26 @@ def test_disabled_placeholder_account_is_skipped(tmp_path):
         "account2": {"enabled": False, "chat_id": 0, "email": "", "password": ""}}}))
     os.chmod(p, 0o600)
     assert list(tgm.load_config(str(p))["accounts"]) == ["me"]
+
+
+def test_stuck_login_expires_and_duplicate_gets_reply():
+    import ppminer.telegram as T
+    sent = []
+
+    class TG:
+        def send(self, chat, text, button=None):
+            sent.append(text)
+
+    b = T.Broker.__new__(T.Broker)
+    import threading
+    b.cfg = {"scan_wait_minutes": 10, "accounts": {"X": {"chat_id": 1}}}
+    b.lock, b.tg = threading.Lock(), TG()
+    clock = [1000.0]
+    b.now = lambda: clock[0]
+    b._login = lambda account, reason: True
+    b.running = {"X": 1000.0}
+    assert b.login("X", "requested") is False                 # fresh attempt in progress: reply, don't start
+    assert any("already in progress" in t for t in sent)
+    clock[0] += 16 * 60                                       # older than scan window + 5 min: treat as stuck
+    assert b.login("X", "requested") is True
+    assert "X" not in b.running
