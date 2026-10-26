@@ -63,6 +63,27 @@ def rule_issues(expr: str, text: str) -> list[str]:
     return issues
 
 
+# Semantics Qwen gets wrong without help (seen 26 Oct: "zeroed out" / "goes short" for trade_when's -1)
+OPERATOR_NOTES = {
+    "trade_when": "trade_when(x, y, z): if z > 0 the position is closed (NaN); else if x > 0 the value is y; "
+                  "otherwise the PREVIOUS value is kept. z = -1 means never close, so the last position is held.",
+    "reverse": "reverse(x) = -x; a leading minus sign is the same operator.",
+}
+
+
+def _operator_lines(expr: str, catalog: Catalog) -> str:
+    """BRAIN's own definitions of the operators used, so text and audit agree with the platform."""
+    s = analyze(expr)
+    out = []
+    for op in sorted(set(s.ops) if s.ok else []):
+        doc = OPERATOR_NOTES.get(op) or getattr(catalog, "op_docs", {}).get(op)
+        if doc:
+            out.append(f"- {doc[:500]}")
+    if expr.lstrip().startswith("-"):
+        out.append("- The expression starts with a minus sign: the whole signal is inverted.")
+    return "\n".join(out) or "(none)"
+
+
 def _field_lines(expr: str, catalog: Catalog, region: str) -> str:
     s = analyze(expr)
     out = []
@@ -81,6 +102,8 @@ def verify(expr: str, text: str, catalog: Catalog, region: str, settings: dict |
 Settings: {json.dumps(settings or {})}
 Field definitions:
 {_field_lines(expr, catalog, region)}
+Operator definitions (from BRAIN):
+{_operator_lines(expr, catalog)}
 
 Description:
 {text}"""
@@ -96,6 +119,8 @@ def rewrite(expr: str, issues: list[str], catalog: Catalog, region: str, setting
 Settings: {json.dumps(settings or {})}
 Field definitions:
 {_field_lines(expr, catalog, region)}
+Operator definitions (from BRAIN):
+{_operator_lines(expr, catalog)}
 
 A previous description had these errors - avoid them:
 {chr(10).join('- ' + i for i in issues)}
@@ -112,6 +137,11 @@ def verified_description(expr: str, draft: str | None, catalog: Catalog, region:
     ok, issues = verify(expr, text, catalog, region, settings)
     if ok:
         return text, []
-    text = rewrite(expr, issues, catalog, region, settings)
-    ok, issues2 = verify(expr, text, catalog, region, settings)
-    return (text, []) if ok else (None, issues + ["after rewrite: " + i for i in issues2])
+    all_issues = list(issues)
+    for attempt in (1, 2):                     # two rewrites, each told every problem found so far
+        text = rewrite(expr, all_issues, catalog, region, settings)
+        ok, new = verify(expr, text, catalog, region, settings)
+        if ok:
+            return text, []
+        all_issues += [f"rewrite {attempt}: {i}" for i in new]
+    return None, all_issues

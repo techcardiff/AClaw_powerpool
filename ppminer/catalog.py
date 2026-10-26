@@ -35,6 +35,7 @@ class Catalog:
         self.by_region: dict[str, dict[str, FieldInfo]] = {}
         self.any_region: dict[str, FieldInfo] = {}
         self.operators: set[str] = set()
+        self.op_docs: dict[str, str] = {}       # operator -> "signature: BRAIN's description"
         for path in sorted(glob.glob(os.path.join(catalog_dir, "brain_meta*.sqlite"))):
             try:
                 self._load(path)
@@ -44,7 +45,9 @@ class Catalog:
     def _load(self, path: str) -> None:
         c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         ds_id = {name: did for did, name in c.execute("select id, name from datasets")}
-        self.operators |= {r[0] for r in c.execute("select name from operators")}
+        for name, definition, desc in c.execute("select name, definition, description from operators"):
+            self.operators.add(name)
+            self.op_docs.setdefault(name, f"{' '.join((definition or name).split())}: {' '.join((desc or '').split())}")
         for fid, ftype, dname, cname, region, desc in c.execute(
                 "select id, type, dataset_name, category_name, region, description from datafields"):
             cat = CATEGORY_ID.get((cname or "").lower(), (cname or "unknown").lower().replace(" ", ""))
