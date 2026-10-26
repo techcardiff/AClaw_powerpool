@@ -67,7 +67,7 @@ ideas after seeing their results (`revise.py`), and writing descriptions (`descr
 |---|---|---|
 | Miner jobs, dashboard, `data/pp.db`, session cookies | **3080 server**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux session `ppminer` (windows `qwen-tunnel`, `web`, `daily` = scheduler), started by `scripts/start_3080.sh` (safe to re-run; restart one service with `tmux kill-window -t ppminer:<name>` then the script, never `pkill -f`). The @reboot cron entry (`scripts/install_3080_cron.sh`) is **not installed yet**, so after a 3080 restart run `scripts/start_3080.sh` by hand |
 | Qwen3.8-27B (vLLM) | **A6000 server**, port 8060, reached through a tunnel on 127.0.0.1:18060 | The vLLM process belongs to **another lab user**; if they stop it, all Qwen steps fail until it's back. Simulations still work. |
-| Telegram login broker | **Mac** (`scripts/start_mac_broker.sh`) | Telegram is blocked from the cluster. New session cookies are copied to the 3080. |
+| Telegram login broker | **Lab workstation** (`~/aclaw_powerpool`, `scripts/start_ws_broker.sh`), since 26 Oct | Telegram is blocked from the cluster and the workstation's network, so the workstation routes through a **Tailscale exit node**; if that node goes offline, the workstation loses internet and logins stop. Runs in a restart loop; after a workstation reboot, start it by hand (no @reboot entry yet). New session cookies are copied to the 3080 with a dedicated `restrict`ed SSH key. Only one broker may run: `scripts/start_mac_broker.sh` is a fallback only. |
 | Code | GitHub `techcardiff/AClaw_powerpool` | `data/` and `ref/` are git-ignored on purpose |
 
 SSH host aliases (`qa-3080`, `qa-a6000`) come from the supervisor's `~/.ssh/config`;
@@ -188,7 +188,7 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 ## 8. Open work, roughly in priority order
 
-1. **Notifications:** relay the auto-submit log through the Mac Telegram broker.
+1. **Notifications:** relay the auto-submit log through the Telegram broker on the workstation.
 2. **Tag test:** check whether tagging an already-submitted regular alpha as `PowerPoolSelected` is
    accepted and whether it uses a daily slot (could add strong Power Pool + Regular alphas without
    using the quota). Prepared, not run.
@@ -208,7 +208,8 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 
 - Accounts: **HT52122** and **YO50689**, each in week 1 of Power Pool. Both have Power Pool alphas
   submitted; see the dashboard's pick list for which.
-- The miner and its database live on the 3080; the Telegram broker runs on the Mac.
+- The miner and its database live on the 3080; the Telegram broker runs on the lab workstation
+  (moved from the Mac on 26 Oct, see section 3).
 - The `daily` scheduler is the single submitter; it was deployed in dry-run mode on 24 Oct, with
   `min_sharpe` 1.15. EUR and ASI field syncs were started the same day.
 - The @reboot cron entry is not installed: after a 3080 restart run `scripts/start_3080.sh`.

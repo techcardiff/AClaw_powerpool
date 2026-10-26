@@ -41,7 +41,13 @@ candidate must be re-simulated before submission.
 |---|---|
 | Dashboard, re-sim / explore / rewrite jobs, `data/pp.db`, session cookies | **3080**, `/data/aclaw_powerpool` (Python: `/data/quant-agent/envs/orchestrator/bin/python`) |
 | Qwen3.8 | A6000; the 3080 reaches it through a tunnel on 127.0.0.1:18060 |
-| Telegram login broker | **Mac** (`scripts/start_mac_broker.sh`); Telegram is blocked from the cluster. Each new cookie is copied to the 3080 (`PP_COOKIE_SYNC`). |
+| Telegram login broker | **Workstation** (since 2026-10-26; `~/aclaw_powerpool`, started by `scripts/start_ws_broker.sh`). Telegram is blocked from the cluster and the workstation's own network, so the workstation routes through a Tailscale exit node. Each new cookie is copied to the 3080 (`PP_COOKIE_SYNC`) with its own restricted SSH key. |
+
+- Broker log: `~/aclaw_powerpool/data/logs/telegram.log` on the workstation. It runs in a restart loop;
+  after a workstation reboot start it with `scripts/start_ws_broker.sh` (no @reboot entry is installed).
+- The workstation's internet goes through the exit node, so the broker needs that node online.
+- Run **only one broker**: two brokers polling the same bot interfere. `scripts/start_mac_broker.sh`
+  is kept only as a fallback if the workstation is down; stop the workstation broker first.
 
 - 3080 services run in tmux session `ppminer` (windows `qwen-tunnel`, `web`), started by
   `scripts/start_3080.sh`; each restarts itself if it exits. Attach: `ssh qa-3080 -t tmux attach -t ppminer`.
