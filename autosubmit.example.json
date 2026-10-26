@@ -24,5 +24,6 @@
     "min_2y_sharpe": 1.0,
     "min_sub_universe_sharpe": 0.7,
     "concentrated_weight": true
-  }
+  },
+  "c_share": 0.375
 }

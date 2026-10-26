@@ -21,7 +21,7 @@ import os
 import sqlite3
 import time
 
-from . import cookies as ck, lanes
+from . import cookies as ck, lanes, ppcorr
 from .brain import Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
@@ -95,6 +95,7 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         tried += 1
         aid, cid = p["alpha_id"], p["candidate_id"]
         s = summarize(brain.alpha(aid), brain.check(aid))
+        s["checks"] = ppcorr.fill(brain, conn, aid, s.get("checks") or [], account)   # when /check has no PP correlation
         chk = json.dumps(s.get("checks"))
         v, why = verdict(s["sharpe"], chk, require_theme=q.theme_required)
         ch = {c.get("name"): c for c in s.get("checks") or []}

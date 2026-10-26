@@ -15,7 +15,7 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
               skip_done: bool = False, exclude_stems: set[str] | None = None,
               min_sharpe: float | None = None, min_fitness: float | None = None,
               exclude_exprs: set[str] | None = None, max_sharpe: float | None = None,
-              skip_ids: set[int] | None = None) -> list[sqlite3.Row]:
+              skip_ids: set[int] | None = None, exclude_datasets: set[str] | None = None) -> list[sqlite3.Row]:
     """Greedy: best |sharpe| first, one per family, capped per dataset and per
     operator shape so the list spreads across data and ideas.
     Single-dataset (Power Pool + ATOM, outside the quota) ranks ahead.
@@ -46,6 +46,8 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
         if exclude_stems and _stems(json.loads(row["fields"])) in exclude_stems:
             continue
         if exclude_exprs and row["expr"].replace(" ", "") in exclude_exprs:
+            continue
+        if exclude_datasets and row["datasets"] in exclude_datasets:
             continue
         cats = set(json.loads(row["categories"]))
         if theme and not theme.matches(delay=row["delay"], region=row["region"], categories=cats):

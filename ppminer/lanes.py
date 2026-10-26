@@ -145,14 +145,54 @@ def _without(rows, ids: set[int], n: int) -> list[sqlite3.Row]:
     return [r for r in rows if r["id"] not in ids][:n]
 
 
+# Share of Lane A slots by source. On YO50689 (26 Oct) 121 of 232 harvested mixed-category
+# alphas cleared the auto-submit quality bar, versus 0 of 630 single-category ones and
+# 0 of 283 Qwen rewrites/explore ideas, so most slots go where the strength is.
+LANE_A_GROUPS = (
+    (("pp_multi",), 0.6),
+    (("pp_ready",), 0.2),
+    (("rewrite", "explore", "template"), 0.2),
+)
+
+
+def saturated_datasets(conn: sqlite3.Connection, account: str, min_fails: int = 5, rate: float = 0.6) -> set[str]:
+    """Dataset combinations whose alphas keep failing Power Pool correlation on this
+    account: its Power Pool already holds that family, so more of it can't be submitted."""
+    stats: dict[str, list[int]] = {}
+    for datasets, checks in conn.execute("""select k.datasets, r.checks from resims r join candidates k on k.id = r.candidate_id
+                                            where r.account=? and r.status='done'""", (account,)):
+        ppc = next((c for c in json.loads(checks or "[]") or [] if c.get("name") == "POWER_POOL_CORRELATION"), {})
+        st = stats.setdefault(datasets, [0, 0])
+        if ppc.get("result") in ("FAIL", "WARNING"):
+            st[0] += 1
+        elif ppc.get("result") == "PASS":
+            st[1] += 1
+    return {d for d, (f, p) in stats.items() if f >= min_fails and f / (f + p) >= rate}
+
+
 def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = ()) -> list[sqlite3.Row]:
     pp, _ = collide_stems(conn, account)
     o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
-    # exact copies of already-submitted alphas are better tagged into the Power Pool than re-simulated
-    rows = shortlist(conn, None, n=n * 3 if o_ids else n, statuses=LANE_A_STATUSES, account=account, skip_done=True,
-                     exclude_stems=pp | o_stems, exclude_exprs=submitted_exprs(conn, account) | o_exprs,
-                     max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
-    return _without(rows, o_ids, n)
+    common = dict(account=account, skip_done=True, exclude_stems=pp | o_stems,
+                  exclude_exprs=submitted_exprs(conn, account) | o_exprs,   # exact copies: tag, don't re-simulate
+                  exclude_datasets=saturated_datasets(conn, account), max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
+    pools = [_without(shortlist(conn, None, n=n * 3, statuses=st, **common), o_ids, n) for st, _ in LANE_A_GROUPS]
+    picked, seen = [], set()
+
+    def take(rows, k):
+        for r in rows:
+            if k <= 0 or len(picked) >= n:
+                return
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                picked.append(r)
+                k -= 1
+
+    for rows, (_, share) in zip(pools, LANE_A_GROUPS):
+        take(rows, max(1, round(n * share)))
+    for rows in pools:                       # unused slots: strongest source first
+        take(rows, n)
+    return picked[:n]
 
 
 # ── Lane C ──────────────────────────────────────────────────────────────────

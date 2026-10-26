@@ -79,7 +79,8 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8,
             catalog = Catalog(catalog_dir)
             catalog.add_account_fields(conn, account)
             try:
-                r = cycle(conn, catalog, account, batch=batch, workers=workers, regions=regions, others=accounts)
+                r = cycle(conn, catalog, account, batch=batch, workers=workers, regions=regions, others=accounts,
+                          c_share=float(cfg.get("c_share", 0.375)))   # Lane C (funnel) share of each batch
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")
                 continue

@@ -160,11 +160,26 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     """Recheck pending PP checks, rebuild picks, describe new picks. Returns number of picks."""
     from .describe import describe, save as save_desc
     from .picks import build, fetch_pnl, passing
+    from . import ppcorr
+    from .verdict import quality_gate
+    fallbacks = 0
     for r in conn.execute("select * from resims where account=? and status='done' and lane is not null", (account,)).fetchall():
         if verdict(r["sharpe"], r["checks"])[0] == "pending":
             s = summarize(brain.alpha(r["alpha_id"]), brain.check(r["alpha_id"]))
-            conn.execute("update resims set checks=? where id=?", (json.dumps(s.get("checks")), r["id"]))
+            checks = s.get("checks") or []
+            # BRAIN often never fills POWER_POOL_CORRELATION in /check; for alphas strong enough
+            # to submit, estimate it from correlations/self (limited per cycle: one call each)
+            if (ppcorr.needs_fallback(checks) and fallbacks < 12
+                    and not quality_gate(r["sharpe"], r["fitness"], r["turnover"], json.dumps(checks))):
+                fallbacks += 1
+                try:
+                    checks = ppcorr.fill(brain, conn, r["alpha_id"], checks, account)
+                except Exception as e:
+                    log(f"  correlations/self for {r['alpha_id']} failed: {e}")
+            conn.execute("update resims set checks=? where id=?", (json.dumps(checks), r["id"]))
     conn.commit()
+    if fallbacks:
+        log(f"[{account}] Power Pool correlation estimated from correlations/self for {fallbacks} alphas")
     rows = passing(conn, account)
     fetch_pnl(conn, brain, account, [r["alpha_id"] for r in rows])
     picks = build(conn, account)
@@ -197,7 +212,7 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
     return added
 
 
-def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.25,
+def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375,
           regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9) -> dict:
     """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
     brain = _brain(account)
