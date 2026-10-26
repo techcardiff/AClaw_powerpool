@@ -12,7 +12,7 @@ from urllib.parse import urljoin
 
 import requests
 
-from . import markets
+from . import markets, sandbox
 
 BASE = "https://api.worldquantbrain.com"
 
@@ -101,6 +101,8 @@ class Brain:
         Returns the final body (on refusal it lists the failing checks) plus the alpha's
         status afterwards: the poll URL can 404 once the submission is done, so the
         alpha itself (status ACTIVE, stage OS) is the real confirmation."""
+        if sandbox.ON:
+            raise RuntimeError("submitting is disabled in a sandbox (PP_SANDBOX); only the live scheduler submits")
         r = self.s.post(f"{BASE}/alphas/{alpha_id}/submit", timeout=60)
         if r.status_code == 401:
             raise AuthRequired("session expired")

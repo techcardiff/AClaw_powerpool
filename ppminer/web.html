@@ -34,9 +34,11 @@
 </style>
 </head>
 <body>
+<!--sandbox-->
 <header>
   <h1>Power Pool Miner</h1>
-  <a href="/search">Alpha Search →</a>
+  <a href="search">Alpha Search →</a>
+  <a href="/song/">song</a>
   <span class="mute" id="updated">loading…</span>
   <span class="mute">refreshes every 5 s</span>
 </header>
@@ -97,7 +99,7 @@ function verdict(r) {
 
 async function tick() {
   let s;
-  try { s = await (await fetch("/api/state")).json(); }
+  try { s = await (await fetch("api/state")).json(); }
   catch { document.getElementById("updated").textContent = "server not reachable"; return; }
   if (window.serverVersion && s.version !== window.serverVersion) { location.reload(); return; }
   window.serverVersion = s.version;
@@ -167,7 +169,7 @@ async function tick() {
       }).join("")
     : '<tr><td class="mute">No pick list yet — run: python -m ppminer picklist --account &lt;name&gt;</td></tr>';
   document.querySelectorAll("[data-pick]").forEach(b => b.onclick = async () => {
-    const r = await post("/api/pick/decide", {alpha_id: b.dataset.pick, status: b.dataset.st});
+    const r = await post("api/pick/decide", {alpha_id: b.dataset.pick, status: b.dataset.st});
     if (!r.ok) alert(r.error); tick();
   });
 
@@ -193,7 +195,7 @@ const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type"
 const msg = t => document.getElementById("loginmsg").textContent = t;
 
 async function loadAccounts(force) {
-  const s = await (await fetch("/api/login-status" + (force ? "?force" : ""))).json();
+  const s = await (await fetch("api/login-status" + (force ? "?force" : ""))).json();
   document.getElementById("accounts").innerHTML = s.accounts.length
     ? s.accounts.map(a => `<span class="pill ${a.live ? "ok" : "bad"}">${esc(a.name)}: ${a.live ? `live, ${a.hours_left ?? "?"}h left` : "expired"}</span>`).join(" ")
       + ` <span class="mute">checked ${esc(s.checked_at)}</span>`
@@ -201,7 +203,7 @@ async function loadAccounts(force) {
   document.getElementById("profiles").innerHTML = s.profiles.map(p =>
     `<button data-profile="${esc(p)}">Open BRAIN login · ${esc(p)}</button>`).join("");
   document.querySelectorAll("[data-profile]").forEach(b => b.onclick = async () => {
-    const r = await post("/api/login/open", {profile: b.dataset.profile});
+    const r = await post("api/login/open", {profile: b.dataset.profile});
     msg(r.ok ? `Opened Chrome '${b.dataset.profile}'. Log in + face scan, then click Save sessions.` : r.error);
   });
   const tg = document.getElementById("telegram");
@@ -209,13 +211,13 @@ async function loadAccounts(force) {
     ? s.telegram.map(a => `<button data-tg="${esc(a)}">Send Telegram login · ${esc(a)}</button>`).join("")
     : `<span class="mute">Telegram not set up: ${esc(s.telegram)}</span>`;
   document.querySelectorAll("[data-tg]").forEach(b => b.onclick = async () => {
-    const r = await post("/api/login/telegram", {account: b.dataset.tg});
+    const r = await post("api/login/telegram", {account: b.dataset.tg});
     msg(r.ok ? `Face-scan link sent to ${b.dataset.tg}'s Telegram. Status updates when the scan is done.` : r.error);
   });
 }
 document.getElementById("grab").onclick = async () => {
   msg("Reading Chrome sessions… (allow the keychain prompt if it appears)");
-  const r = await post("/api/login/grab");
+  const r = await post("api/login/grab");
   msg(r.ok ? (r.saved.length ? "Saved: " + r.saved.map(s => `${s.name} (${s.profile})`).join(", ") : "No live BRAIN session found in Chrome.") : r.error);
   loadAccounts(true);
 };

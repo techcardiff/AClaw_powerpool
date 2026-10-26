@@ -151,6 +151,8 @@ def quality_bar(cfg: dict, acfg: dict) -> dict:
 
 def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force_dry_run: bool = False) -> dict:
     from .db import connect
+    from . import sandbox
+    force_dry_run = force_dry_run or sandbox.ON          # a sandbox only shows what it would submit
     cfg = load_config()
     conn = connect(db_path)
     lanes.migrate(conn)

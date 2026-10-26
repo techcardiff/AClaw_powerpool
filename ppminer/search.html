@@ -41,6 +41,7 @@
 </style>
 </head>
 <body>
+<!--sandbox-->
 <header>
   <h1>Alpha Search</h1>
   <label class="mute">account <select id="account"></select></label>
@@ -52,7 +53,7 @@
     <button data-tab="editor">Editor</button>
     <button data-tab="templates">Templates</button>
   </nav>
-  <a href="/">← dashboard</a>
+  <a href="./">← dashboard</a>
 </header>
 <main>
   <section id="tab-funnel">
@@ -149,8 +150,8 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num = (v, d=2) => v == null ? "–" : Number(v).toFixed(d);
-const get = (route, extra = {}) => fetch(`/api/search/${route}?` + new URLSearchParams({account: $("account").value, region: $("region").value, ...extra})).then(r => r.json());
-const post = (route, body) => fetch(`/api/search/${route}`, {method: "POST",
+const get = (route, extra = {}) => fetch(`api/search/${route}?` + new URLSearchParams({account: $("account").value, region: $("region").value, ...extra})).then(r => r.json());
+const post = (route, body) => fetch(`api/search/${route}`, {method: "POST",
   headers: {"Content-Type": "application/json", "X-PP-Dashboard": "1"},
   body: JSON.stringify({account: $("account").value, region: $("region").value, ...body})}).then(r => r.json());
 const UNIVERSE = {USA: "TOP3000", EUR: "TOP2500", ASI: "MINVOL1M", GLB: "TOP3000"};

@@ -10,12 +10,22 @@ import os
 import sqlite3
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import cookies as ck
+from . import cookies as ck, sandbox
 from .verdict import regular_verdict, verdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SONG_PORT = int(os.getenv("PP_SONG_PORT", "5071"))      # Song's sandbox dashboard, shown under /song/
+BANNER = (f'<div style="background:#fde68a;color:#222;padding:6px 16px">Sandbox <b>{sandbox.NAME}</b>: its own '
+          'code and database; simulates on BRAIN but never submits. <a href="/">live dashboard</a></div>')
+
+
+def _page(name: str) -> bytes:
+    html = open(os.path.join(HERE, name), encoding="utf-8").read()
+    return html.replace("<!--sandbox-->", BANNER if sandbox.ON else "").encode()
 
 
 def _rows(conn, q, args=()):
@@ -210,8 +220,6 @@ def search_post(db_path: str, path: str, b: dict) -> dict:
 
 
 def serve(db_path: str, port: int = 5070) -> None:
-    page = open(os.path.join(HERE, "web.html"), "rb").read()
-
     class H(BaseHTTPRequestHandler):
         def _send(self, body: bytes, ctype: str = "application/json", code: int = 200):
             self.send_response(code)
@@ -220,21 +228,50 @@ def serve(db_path: str, port: int = 5070) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _proxy(self, body: bytes | None = None):
+            """/song/... -> Song's sandbox dashboard, so it shares this site and its password."""
+            if self.path == "/song":
+                self.send_response(301)
+                self.send_header("Location", "/song/")
+                self.end_headers()
+                return
+            req = urllib.request.Request(f"http://127.0.0.1:{SONG_PORT}{self.path[len('/song'):]}", data=body,
+                                         method=self.command)
+            for h in ("Content-Type", "X-PP-Dashboard"):
+                if self.headers.get(h):
+                    req.add_header(h, self.headers[h])
+            try:
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    self._send(r.read(), r.headers.get("Content-Type", "text/plain"), r.status)
+            except urllib.error.HTTPError as e:
+                self._send(e.read(), e.headers.get("Content-Type", "text/plain"), e.code)
+            except OSError:
+                self._send(b"Song's sandbox is not running. On the 3080: bash /data/aclaw_song/scripts/sandbox.sh start",
+                           "text/plain; charset=utf-8", 502)
+
+        def _is_song(self) -> bool:
+            return not sandbox.ON and (self.path == "/song" or self.path.startswith("/song/"))
+
         def do_GET(self):
-            if self.path.startswith("/api/state"):
+            if self._is_song():
+                self._proxy()
+            elif self.path.startswith("/api/state"):
                 self._send(json.dumps(snapshot(db_path), default=str).encode())
             elif self.path.startswith("/api/login-status"):
                 self._send(json.dumps(login_status("force" in self.path)).encode())
             elif self.path in ("/", "/index.html"):
-                self._send(page, "text/html; charset=utf-8")
+                self._send(_page("web.html"), "text/html; charset=utf-8")
             elif self.path == "/search":
-                self._send(open(os.path.join(HERE, "search.html"), "rb").read(), "text/html; charset=utf-8")
+                self._send(_page("search.html"), "text/html; charset=utf-8")
             elif self.path.startswith("/api/search/"):
                 self._send(json.dumps(search_get(db_path, self.path), default=str).encode())
             else:
                 self.send_error(404)
 
         def do_POST(self):
+            if self._is_song():
+                self._proxy(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                return
             # only our own page sends this header; blocks cross-site form posts to localhost
             if self.headers.get("X-PP-Dashboard") != "1":
                 self.send_error(403)
