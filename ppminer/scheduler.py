@@ -16,7 +16,7 @@ import datetime as dt
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import autosubmit, lanes
+from . import autosubmit, lanes, marketx
 from .catalog import Catalog
 from .quota import ny_now
 from .fields import sync_step
@@ -46,6 +46,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
     n = conn.execute("delete from resims where status='running' or (status='queued' and coalesce(lane,'')<>'M')").rowcount
     conn.commit()
     t_end = time.time() + hours * 3600
+    n += marketx.clear_unfinished(marketx.connect())
     log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
     while time.time() < t_end:
         cfg = autosubmit.load_config()
@@ -75,6 +76,8 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                         log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
                 except Exception as e:
                     log(f"[{account}] fields {region}: {e}")
+        mxc = cfg.get("market_explore", {"enabled": True, "regions": ["EUR", "ASI", "GLB"]})
+        mx_regions = mxc.get("regions") if mxc.get("enabled", True) else None
         # both accounts mine at the same time, each with its own connection and catalog
         def mine(account):
             c2 = connect(db_path)
@@ -84,7 +87,8 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                 return cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
                              regions=regions, others=accounts,
                              c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
-                             slots=int(cfg.get("multisim_slots", 2)))           # multi-simulations (<= 10 each) in flight
+                             slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
+                             market_regions=mx_regions)                         # template exploration in free slots
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")
                 return {"status": "error", "sims": 0}

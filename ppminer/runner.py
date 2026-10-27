@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import cookies as ck
-from . import lanes, revise
+from . import lanes, marketx, revise
 from .brain import AuthRequired, Brain, settings_for, summarize
 from .catalog import Catalog
 from .fields import block
@@ -92,9 +92,12 @@ def _chunks(rows: dict, ids: list[int]) -> list[list[int]]:
     return [g[k:k + MULTISIM_SIZE] for g in groups.values() for k in range(0, len(g), MULTISIM_SIZE)]
 
 
-def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slots: int = 2) -> dict:
+def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slots: int = 2,
+             extra: list[dict] | None = None, mx=None) -> dict:
     """Simulate a batch as BRAIN multi-simulations, `slots` of them in flight (up to 10
-    alphas each). DB writes stay on this thread; results are saved as each one lands."""
+    alphas each). DB writes stay on this thread; results are saved as each one lands.
+    `extra` (market exploration, saved to markets.db via `mx`) is submitted after the
+    batch, so it runs in the first slot that frees up."""
     rows = {i: conn.execute("select * from resims where id=?", (i,)).fetchone() for i in ids}
 
     def sim_chunk(chunk):
@@ -112,7 +115,19 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
                 out.append((i, e))
         return out
 
-    stats = {"done": 0, "error": 0, "requeued": 0, "pp_ok": 0, "reg_ok": 0}
+    def sim_extra(jobs):
+        alphas = brain.multi_simulate([(j["expr"], j["settings"]) for j in jobs])
+        out = []
+        for j, a in zip(jobs, alphas):
+            try:
+                out.append((j, a if isinstance(a, Exception) else summarize(a, brain.check(a["id"]))))
+            except AuthRequired:
+                raise
+            except Exception as e:
+                out.append((j, e))
+        return out
+
+    stats = {"done": 0, "error": 0, "requeued": 0, "pp_ok": 0, "reg_ok": 0, "market": 0}
     expired = False
     chunks = _chunks(rows, ids)
     with ThreadPoolExecutor(max(1, slots)) as ex:
@@ -122,7 +137,26 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
                 conn.execute("update resims set status='running' where id=?", (i,))
             futs[ex.submit(sim_chunk, chunk)] = chunk
         conn.commit()
+        extra_fu = ex.submit(sim_extra, extra) if extra and mx is not None else None
+        if extra_fu:
+            futs[extra_fu] = None
         for fu in as_completed(futs):
+            if fu is extra_fu:
+                try:
+                    for j, res in fu.result():
+                        marketx.record(mx, j["id"], res)
+                        stats["market"] += not isinstance(res, Exception)
+                        if not isinstance(res, Exception):
+                            chk = json.dumps(res.get("checks"))
+                            log(f"  [X] {j['settings']['region']} {res['alpha_id']} sh={res['sharpe']} to={res['turnover']} "
+                                f"PP={verdict(res['sharpe'], chk)[0]} REG={regular_verdict(chk)[0]} | {j['expr'][:70]}")
+                except AuthRequired:
+                    expired = True
+                except Exception as e:
+                    for j in extra:
+                        marketx.record(mx, j["id"], e)
+                    log(f"  [X] market multi-simulation failed: {str(e)[:140]}")
+                continue
             chunk = futs[fu]
             try:
                 results = fu.result()
@@ -245,7 +279,8 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
 
 
 def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
-          regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9) -> dict:
+          regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9,
+          market_regions: list[str] | None = None) -> dict:
     """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
     brain = _brain(account)
     if brain is None:
@@ -262,7 +297,16 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
         return {"status": "empty", "sims": 0}
     lanes.set_state(conn, status="simulating", account=account, batch=len(ids))
     log(f"[{account}] batch of {len(ids)}: " + ", ".join(f"{k}={v}" for k, v in _lane_counts(conn, ids).items()))
-    st = run_jobs(conn, brain, account, ids, workers, slots)
+    extra, mx = [], None
+    if market_regions:          # template alphas in other markets, in the slot the batch leaves free
+        mx = marketx.connect()
+        try:
+            extra = marketx.next_chunk(conn, mx, account, market_regions)
+        except Exception as e:
+            log(f"[{account}] market exploration: {e}")
+        if extra:
+            log(f"[{account}] market exploration: {len(extra)} template alphas in {extra[0]['settings']['region']}")
+    st = run_jobs(conn, brain, account, ids, workers, slots, extra, mx)
     if st["expired"]:
         return {"status": "waiting_login", "sims": st["done"] + st["error"]}
     n_picks = after_batch(conn, catalog, brain, account)

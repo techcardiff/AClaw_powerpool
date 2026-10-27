@@ -27,5 +27,13 @@
   },
   "c_share": 0.375,
   "batch": 30,
-  "multisim_slots": 2
+  "multisim_slots": 2,
+  "market_explore": {
+    "enabled": true,
+    "regions": [
+      "EUR",
+      "ASI",
+      "GLB"
+    ]
+  }
 }
