@@ -25,5 +25,7 @@
     "min_sub_universe_sharpe": 0.7,
     "concentrated_weight": true
   },
-  "c_share": 0.375
+  "c_share": 0.375,
+  "batch": 30,
+  "multisim_slots": 2
 }

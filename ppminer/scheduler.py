@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import autosubmit, lanes
 from .catalog import Catalog
@@ -36,7 +37,7 @@ def _due(conn, account: str, cfg: dict) -> bool:
     return now - last >= dt.timedelta(hours=float(cfg.get("retry_hours", 3)))
 
 
-def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8, workers: int = 4) -> None:
+def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30, workers: int = 4) -> None:
     from .db import connect
     conn = connect(db_path)
     lanes.migrate(conn)
@@ -74,16 +75,23 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 8,
                         log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
                 except Exception as e:
                     log(f"[{account}] fields {region}: {e}")
-        waiting = 0
-        for account in accounts:
-            catalog = Catalog(catalog_dir)
-            catalog.add_account_fields(conn, account)
+        # both accounts mine at the same time, each with its own connection and catalog
+        def mine(account):
+            c2 = connect(db_path)
             try:
-                r = cycle(conn, catalog, account, batch=batch, workers=workers, regions=regions, others=accounts,
-                          c_share=float(cfg.get("c_share", 0.375)))   # Lane C (funnel) share of each batch
+                catalog = Catalog(catalog_dir)
+                catalog.add_account_fields(c2, account)
+                return cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
+                             regions=regions, others=accounts,
+                             c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
+                             slots=int(cfg.get("multisim_slots", 2)))           # multi-simulations (<= 10 each) in flight
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")
-                continue
-            waiting += r["status"] in ("waiting_login", "empty")
-        if waiting == len(accounts):
+                return {"status": "error", "sims": 0}
+            finally:
+                c2.close()
+
+        with ThreadPoolExecutor(len(accounts)) as ex:
+            results = list(ex.map(mine, accounts))
+        if all(r["status"] in ("waiting_login", "empty") for r in results):
             time.sleep(LOGIN_POLL_SECONDS)

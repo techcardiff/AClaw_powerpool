@@ -86,6 +86,35 @@ class Brain:
             raise RuntimeError(f"simulation failed: {sim.get('status')} {sim.get('message', '')}")
         return self.alpha(sim["alpha"])
 
+    def multi_simulate(self, items: list[tuple[str, dict]], max_wait: int = 3600) -> list:
+        """Up to 10 alphas in one BRAIN multi-simulation. Returns one entry per item, in
+        order: the alpha dict, or an Exception with BRAIN's message for that child."""
+        if len(items) == 1:
+            try:
+                return [self.simulate(*items[0])]
+            except AuthRequired:
+                raise
+            except Exception as e:
+                return [e]
+        body = [{"type": "REGULAR", "settings": st, "regular": ex} for ex, st in items]
+        r = self._req("POST", f"{BASE}/simulations", json=body)
+        parent = self._poll(r.headers["Location"], max_wait=max_wait)
+        children = parent.get("children") or []
+        if not children:
+            raise RuntimeError(f"multi-simulation failed: {parent.get('status')} {parent.get('message', '')}")
+        out = []
+        for child in children:
+            try:
+                sim = self._poll(f"{BASE}/simulations/{child}", max_wait=600)
+                if "alpha" not in sim:
+                    raise RuntimeError(f"simulation failed: {sim.get('status')} {sim.get('message', '')}")
+                out.append(self.alpha(sim["alpha"]))
+            except AuthRequired:
+                raise
+            except Exception as e:
+                out.append(e)
+        return out
+
     def alpha(self, alpha_id: str) -> dict:
         return self._req("GET", f"{BASE}/alphas/{alpha_id}").json()
 

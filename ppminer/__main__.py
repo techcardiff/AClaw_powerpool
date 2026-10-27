@@ -507,7 +507,7 @@ def main(argv=None):
         DB_PATH, CATALOG_DIR, a.account, a.dry_run)))
     sp = sub.add_parser("daily", help="scheduler: autosubmit after midnight New York, mine the rest of the day")
     sp.add_argument("--hours", type=float, default=24 * 365)
-    sp.add_argument("--batch", type=int, default=8)
+    sp.add_argument("--batch", type=int, default=30)
     sp.add_argument("--workers", type=int, default=4)
     sp.set_defaults(fn=lambda a: __import__("ppminer.scheduler", fromlist=["run"]).run(
         DB_PATH, CATALOG_DIR, a.hours, a.batch, a.workers))

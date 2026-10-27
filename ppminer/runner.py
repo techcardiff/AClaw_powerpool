@@ -80,52 +80,84 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     return ids
 
 
-def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int) -> dict:
+MULTISIM_SIZE = 10          # BRAIN takes up to 10 alphas per multi-simulation
+
+
+def _chunks(rows: dict, ids: list[int]) -> list[list[int]]:
+    """Group jobs into multi-simulations of up to 10 with the same region/universe/delay."""
+    groups: dict[tuple, list[int]] = {}
+    for i in ids:
+        st = json.loads(rows[i]["settings"])
+        groups.setdefault((st.get("region"), st.get("universe"), st.get("delay")), []).append(i)
+    return [g[k:k + MULTISIM_SIZE] for g in groups.values() for k in range(0, len(g), MULTISIM_SIZE)]
+
+
+def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slots: int = 2) -> dict:
+    """Simulate a batch as BRAIN multi-simulations, `slots` of them in flight (up to 10
+    alphas each). DB writes stay on this thread; results are saved as each one lands."""
     rows = {i: conn.execute("select * from resims where id=?", (i,)).fetchone() for i in ids}
 
-    def sim(i):
-        r = rows[i]
-        a = brain.simulate(r["expr"], json.loads(r["settings"]))
-        return summarize(a, brain.check(a["id"]))
+    def sim_chunk(chunk):
+        alphas = brain.multi_simulate([(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk])
+        out = []
+        for i, a in zip(chunk, alphas):
+            if isinstance(a, Exception):
+                out.append((i, a))
+                continue
+            try:
+                out.append((i, summarize(a, brain.check(a["id"]))))
+            except AuthRequired:
+                raise
+            except Exception as e:
+                out.append((i, e))
+        return out
 
     stats = {"done": 0, "error": 0, "requeued": 0, "pp_ok": 0, "reg_ok": 0}
     expired = False
-    with ThreadPoolExecutor(workers) as ex:
+    chunks = _chunks(rows, ids)
+    with ThreadPoolExecutor(max(1, slots)) as ex:
         futs = {}
-        for i in ids:
-            conn.execute("update resims set status='running' where id=?", (i,))
-            futs[ex.submit(sim, i)] = i
+        for chunk in chunks:
+            for i in chunk:
+                conn.execute("update resims set status='running' where id=?", (i,))
+            futs[ex.submit(sim_chunk, chunk)] = chunk
         conn.commit()
         for fu in as_completed(futs):
-            i, r = futs[fu], rows[futs[fu]]
+            chunk = futs[fu]
             try:
-                s = fu.result()
+                results = fu.result()
             except AuthRequired:
                 expired = True
-                conn.execute("delete from resims where id=?", (i,))     # retried after the next login
-                stats["requeued"] += 1
-                continue
-            except Exception as e:
-                msg = str(e)
-                conn.execute("update resims set status='error', error=? where id=?", (msg[:500], i))
-                if m := re.search(r"Invalid data field (\w+)", msg):
-                    block(conn, account, m.group(1), "BRAIN: invalid data field")
+                for i in chunk:
+                    conn.execute("delete from resims where id=?", (i,))  # retried after the next login
+                stats["requeued"] += len(chunk)
                 conn.commit()
-                stats["error"] += 1
-                log(f"  [{r['lane']}] #{r['candidate_id']} error: {re.sub('<[^>]+>', '', msg)[:140]}")
                 continue
-            conn.execute("""update resims set alpha_id=?, sharpe=?, fitness=?, turnover=?, returns=?, drawdown=?,
-                            checks=?, pp_corr=?, status='done' where id=?""",
-                         (s["alpha_id"], s["sharpe"], s["fitness"], s["turnover"], s["returns"], s["drawdown"],
-                          json.dumps(s.get("checks")), s.get("pp_corr"), i))
-            conn.commit()                # save each result as it lands; an interrupted batch keeps its finished sims
-            chk = json.dumps(s.get("checks"))
-            pv, rv = verdict(s["sharpe"], chk)[0], regular_verdict(chk)[0]
-            stats["done"] += 1
-            stats["pp_ok"] += pv == "pp_ok"
-            stats["reg_ok"] += rv == "reg_ok"
-            log(f"  [{r['lane']}] #{r['candidate_id']} {s['alpha_id']} sh={s['sharpe']} to={s['turnover']} "
-                f"PP={pv} REG={rv} ({r['purpose']})")
+            except Exception as e:                                     # the whole multi-simulation failed
+                results = [(i, e) for i in chunk]
+            for i, s in results:
+                r = rows[i]
+                if isinstance(s, Exception):
+                    msg = str(s)
+                    conn.execute("update resims set status='error', error=? where id=?", (msg[:500], i))
+                    if m := re.search(r"Invalid data field (\w+)", msg):
+                        block(conn, account, m.group(1), "BRAIN: invalid data field")
+                    conn.commit()
+                    stats["error"] += 1
+                    log(f"  [{r['lane']}] #{r['candidate_id']} error: {re.sub('<[^>]+>', '', msg)[:140]}")
+                    continue
+                conn.execute("""update resims set alpha_id=?, sharpe=?, fitness=?, turnover=?, returns=?, drawdown=?,
+                                checks=?, pp_corr=?, status='done' where id=?""",
+                             (s["alpha_id"], s["sharpe"], s["fitness"], s["turnover"], s["returns"], s["drawdown"],
+                              json.dumps(s.get("checks")), s.get("pp_corr"), i))
+                conn.commit()            # save each result as it lands; an interrupted batch keeps its finished sims
+                chk = json.dumps(s.get("checks"))
+                pv, rv = verdict(s["sharpe"], chk)[0], regular_verdict(chk)[0]
+                stats["done"] += 1
+                stats["pp_ok"] += pv == "pp_ok"
+                stats["reg_ok"] += rv == "reg_ok"
+                log(f"  [{r['lane']}] #{r['candidate_id']} {s['alpha_id']} sh={s['sharpe']} to={s['turnover']} "
+                    f"PP={pv} REG={rv} ({r['purpose']})")
     conn.commit()
     stats["expired"] = expired
     return stats
@@ -212,7 +244,7 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
     return added
 
 
-def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375,
+def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
           regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9) -> dict:
     """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
     brain = _brain(account)
@@ -230,7 +262,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
         return {"status": "empty", "sims": 0}
     lanes.set_state(conn, status="simulating", account=account, batch=len(ids))
     log(f"[{account}] batch of {len(ids)}: " + ", ".join(f"{k}={v}" for k, v in _lane_counts(conn, ids).items()))
-    st = run_jobs(conn, brain, account, ids, workers)
+    st = run_jobs(conn, brain, account, ids, workers, slots)
     if st["expired"]:
         return {"status": "waiting_login", "sims": st["done"] + st["error"]}
     n_picks = after_batch(conn, catalog, brain, account)
