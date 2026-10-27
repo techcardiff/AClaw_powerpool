@@ -66,10 +66,12 @@ def fresh_datasets(conn: sqlite3.Connection, account: str, region: str = "USA", 
 
 
 def _fields(conn, account, region, delay, dataset, k=40):
+    """The dataset's best-covered fields, minus families overused in our submitted alphas."""
+    over = hints.overused(conn)
     rows = conn.execute("""select field, type, description, coverage, user_count, alpha_count from account_fields
                            where account=? and region=? and delay=? and dataset=? and type in ('MATRIX','VECTOR')
-                           order by coalesce(coverage,0) desc limit ?""", (account, region, delay, dataset, k)).fetchall()
-    return rows
+                           order by coalesce(coverage,0) desc""", (account, region, delay, dataset)).fetchall()
+    return [r for r in rows if not hints.is_overused(r["field"], over)][:k]
 
 
 def explore(conn: sqlite3.Connection, catalog: Catalog, account: str, ds: sqlite3.Row,
@@ -77,8 +79,8 @@ def explore(conn: sqlite3.Connection, catalog: Catalog, account: str, ds: sqlite
     fields = _fields(conn, account, region, delay, ds["dataset"])
     if not fields:
         return []
-    lines = "\n".join(f"- {f['field']} [{f['type']}, coverage {f['coverage'] or 0:.2f}]: {(f['description'] or '')[:150]}"
-                      for f in fields)
+    lines = "\n".join(f"- {f['field']} [{f['type']}, coverage {f['coverage'] or 0:.2f}, "
+                      f"{f['alpha_count'] or 0} platform alphas]: {(f['description'] or '')[:150]}" for f in fields)
     prompt = f"""Dataset {ds['dataset']} — {ds['name']} (category {ds['category']}, region {region}, delay {delay}).
 Fields:
 {lines}

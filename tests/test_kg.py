@@ -40,3 +40,22 @@ def test_other_regions_borrow_usa_evidence():
 def test_placeholders_keep_structure_not_fields():
     expr = "group_rank(ts_mean(anl4_ptp_high / enterprise_value, 60), industry)"
     assert hints._placeholders(expr, ["enterprise_value", "anl4_ptp_high"]) == "group_rank(ts_mean(y / x, 60), industry)"
+
+
+def test_overused_fields_are_hidden_from_qwen():
+    from ppminer.explore import _fields
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript("""create table account_submitted (stems text, expr text);
+                       create table account_fields (account text, region text, delay int, field text, dataset text, type text,
+                                                    description text, coverage real, user_count int, alpha_count int);""")
+    subs = [("vwap,cap,anl_x", "rank(vwap / cap) + anl_x_low"), ("vwap,cap,anl_x", "vwap * anl_x_high + cap"),
+            ("vwap,cap,anl_x,fnd6", "group_rank(vwap - fnd6_tfvce + anl_x_mean, industry) / cap")]
+    for stems, expr in subs:
+        c.execute("insert into account_submitted values (?, ?)", (stems, expr))
+    for f in ("vwap", "anl_x_mean", "anl_x_new", "fnd6_tfvce", "fnd6_newq_gem", "fresh_y"):
+        c.execute("insert into account_fields values ('A', 'USA', 1, ?, 'd1', 'MATRIX', '', 1.0, 0, 0)", (f,))
+    # vwap 3 uses; family anl_x* 3 uses; fnd6 only once and too generic as a family; cap kept for size buckets
+    assert dict(hints.overused(c)) == {"vwap": 3, "anl_x*": 3}
+    assert [r["field"] for r in _fields(c, "A", "USA", 1, "d1")] == ["fnd6_tfvce", "fnd6_newq_gem", "fresh_y"]
+    assert "anl_x* (3)" in hints.overused_note(c)

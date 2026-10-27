@@ -23,6 +23,7 @@ import time
 from collections import defaultdict
 from itertools import combinations
 
+from . import hints
 from .harvest import SUSPICIOUS_SHARPE
 
 PROVEN_SHARPE = 1.25
@@ -123,13 +124,16 @@ def gems(conn, account: str, region: str, dataset: str | None = None, exclude: s
     return sorted(rows, key=lambda r: -(r["rate"] * r["avg_sharpe"] * min(r["proven"], 20) ** 0.5))[:k]
 
 
-def proven_pairs(conn, region: str, fields: set[str], k: int = 6) -> list[tuple[str, str, int, float]]:
-    """Proven pairs that involve any of `fields` (USA evidence for other regions)."""
+def proven_pairs(conn, region: str, fields: set[str], k: int = 6,
+                 exclude: list[tuple[str, int]] = ()) -> list[tuple[str, str, int, float]]:
+    """Proven pairs that involve any of `fields` (USA evidence for other regions); pairs
+    with a field overused in our submitted alphas (`exclude`, hints.overused) are left out."""
     g = graph(conn)
     out = []
     for src in dict.fromkeys([region, "USA"]):
         for (a, b), (n, s) in g.get(src, {}).get("pairs", {}).items():
-            if n >= 2 and (a in fields or b in fields):
+            if n >= 2 and (a in fields or b in fields) and not hints.is_overused(a, exclude) \
+                    and not hints.is_overused(b, exclude):
                 out.append((a, b, n, s / n))
         if out:
             break
@@ -149,10 +153,12 @@ def _fmt(r: dict, region: str) -> str:
             f"used by {r['platform_alphas']} platform alphas{where}")
 
 
-def block(conn, account: str, region: str, dataset: str | None = None, avoid: set[str] = frozenset()) -> str:
+def block(conn, account: str, region: str, dataset: str | None = None, avoid: set[str] = frozenset(),
+          overused: list[tuple[str, int]] = ()) -> str:
     """Prompt section: hidden gems (this dataset first, then partners from other datasets),
     their proven pairs, and crowded hubs to avoid. Families in `avoid` (our submitted
-    alphas' field stems) are left out: they would fail Power Pool correlation."""
+    alphas' field stems) are left out: they would fail Power Pool correlation; pairs and
+    crowded fields leave out the `overused` families too."""
     lines = [f"[KNOWLEDGE GRAPH - what our own simulations proved, {region}]"]
     here = gems(conn, account, region, dataset, avoid, k=8) if dataset else []
     partners = [r for r in gems(conn, account, region, None, avoid, k=14) if r["field"] not in {x["field"] for x in here}][:8]
@@ -162,11 +168,11 @@ def block(conn, account: str, region: str, dataset: str | None = None, avoid: se
     if partners:
         lines.append(" PROVEN PARTNERS from other datasets (pair ONE with a field of this dataset):")
         lines += [_fmt(r, region) for r in partners]
-    pairs = proven_pairs(conn, region, {r["field"] for r in here + partners})
+    pairs = proven_pairs(conn, region, {r["field"] for r in here + partners}, exclude=overused)
     if pairs:
         lines.append(" PROVEN PAIRS (co-occur in our quality alphas):")
         lines += [f"  {a} + {b} (n={n}, avg |sharpe| {s:.2f})" for a, b, n, s in pairs]
-    crowded = hubs(conn, account, region, dataset)
+    crowded = [f for f in hubs(conn, account, region, dataset) if not hints.is_overused(f, overused)]
     if crowded:
         lines.append(f" CROWDED (most used on the platform - high correlation risk, avoid): {', '.join(crowded)}")
     return "\n".join(lines) + "\n" if len(lines) > 1 else ""

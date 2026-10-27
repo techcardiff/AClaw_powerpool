@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections import Counter
 
 from . import kg
+from .expr import GROUPING_FIELDS, analyze
 from .select import _shape, _stems
 from .verdict import QUALITY_DEFAULTS, quality_gate
 
@@ -98,14 +100,58 @@ def theme_goal(theme, region: str) -> str:
     return goal + "\n"
 
 
-def avoid_stems(conn: sqlite3.Connection) -> set[str]:
-    """Field families already in the team's submitted alphas (shared correlation pool)."""
-    out = set()
+# A field (or specific field family) in this many of the team's submitted alphas is overused:
+# Qwen never sees it (field lists, pairs) and is told to avoid it. cap and adv20 stay: the size-bucket and
+# liquid-names fixes above use them for grouping, not as signal.
+OVERUSED = 3
+FIX_FIELDS = {"cap", "adv20"}
+
+
+def submitted_usage(conn: sqlite3.Connection) -> Counter:
+    """Field family -> number of the team's submitted alphas using it (shared correlation pool)."""
+    out = Counter()
     for (stems,) in conn.execute("select stems from account_submitted"):
-        out |= {s for s in (stems or "").split(",") if s}
+        out.update({s for s in (stems or "").split(",") if s})
     return out
 
 
+def submitted_fields(conn: sqlite3.Connection) -> Counter:
+    """Exact field -> number of the team's submitted alphas using it."""
+    out = Counter()
+    for (expr,) in conn.execute("select expr from account_submitted"):
+        out.update(analyze(expr or "").names - GROUPING_FIELDS)
+    return out
+
+
+def _avoid(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """(name, uses) to avoid, most used first: a family 'x_y*' when its name is specific (has
+    an underscore: horizon variants of one signal), else the exact field - a family like
+    'fnd6' would also hide unrelated fnd6_* fields, including proven ones."""
+    fams = [(f"{s}*", n) for s, n in submitted_usage(conn).items() if n >= OVERUSED and "_" in s and s not in FIX_FIELDS]
+    fields = [(f, n) for f, n in submitted_fields(conn).items() if n >= OVERUSED and f not in FIX_FIELDS
+              and not any(f.startswith(x[:-1] + "_") for x, _ in fams)]
+    return sorted(fams + fields, key=lambda x: -x[1])
+
+
+def is_overused(field: str, avoid: list[tuple[str, int]]) -> bool:
+    return any(field == x or (x.endswith("*") and field.startswith(x[:-1] + "_")) for x, _ in avoid)
+
+
+def overused(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    return _avoid(conn)
+
+
+def overused_note(conn: sqlite3.Connection, k: int = 18) -> str:
+    top = _avoid(conn)[:k]
+    if not top:
+        return ""
+    return ("[OVERUSED IN OUR SUBMITTED ALPHAS - fails Power Pool correlation; never use these fields\n"
+            " (x* = every horizon variant x_...); number = submitted alphas using it]\n  "
+            + ", ".join(f"{s} ({n})" for s, n in top) + "\n")
+
+
 def block(conn: sqlite3.Connection, account: str, region: str, dataset: str | None = None, theme=None) -> str:
-    return (RULES + examples(conn, region) + kg.block(conn, account, region, dataset, avoid_stems(conn))
-            + theme_goal(theme, region))
+    # hidden gems leave out every family we submitted at all; field lists and pairs leave out the overused ones
+    return (RULES + examples(conn, region)
+            + kg.block(conn, account, region, dataset, set(submitted_usage(conn)), overused(conn))
+            + overused_note(conn) + theme_goal(theme, region))
