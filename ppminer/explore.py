@@ -10,33 +10,36 @@ import sqlite3
 
 from .catalog import Catalog
 from .llm import LLM_MODEL, chat_json
-from . import markets
+from . import hints, markets
 from .pp import check
 
-SYSTEM = """You are a senior WorldQuant BRAIN researcher creating simple, robust Power Pool alphas
-from ONE dataset. Rules:
-- use only fields from the list given, at most 2 fields per alpha
-- at most 5 operators in total (+ - * / and comparisons count; ts_backfill is free)
+SYSTEM = """You are a senior WorldQuant BRAIN researcher creating robust Power Pool alphas that must
+clear the submission bar given below. Build mainly on ONE dataset (the one given). Rules:
+- use only fields from the lists given, at most 3 fields per alpha; you MAY add ONE proven partner
+  field from another dataset (listed under PROVEN PARTNERS) when it makes economic sense
+- at most 8 operators in total (+ - * / and comparisons count; ts_backfill is free)
 - VECTOR fields must be wrapped in vec_avg(...) or vec_sum(...)
 - wrap sparse fields (low coverage) in ts_backfill(field, 60)
 - each alpha needs a clear economic hypothesis; positive values = long
-- slow windows (20-252 days) keep turnover low
-- DIVERSITY: every alpha must use a different structure from this menu, and different fields
-  where possible:
-    level         rank(x) | group_rank(x, industry)
-    change        ts_delta(x, d) | x - ts_mean(x, d)
-    surprise      ts_zscore(x, d) | ts_rank(x, d)
-    trend         ts_regression(x, ts_step(1), d, rettype=2) | ts_decay_linear(x, d)
-    spread/ratio  x / y | x - y   (two related fields)
-    stability     -ts_std_dev(x, d) / ts_mean(abs(x), d)
-    event-gated   trade_when(ts_delta(x, 1) != 0, rank(x), -1)
-  Do not wrap every alpha in the same outer operator."""
+- prefer the HIDDEN GEMS: proven by our simulations yet little used on the platform, so the
+  alpha is strong AND weakly correlated with what others (and our own Power Pool) hold
+- avoid CROWDED fields
+- pick decay (0-20; higher = slower, lower turnover) and neutralization (MARKET, SECTOR,
+  INDUSTRY or SUBINDUSTRY) for each alpha
+- DIVERSITY: every alpha a different structure (level, change, surprise, trend, ratio/spread of
+  two related fields, stability, event-gated) and different fields where possible
+No scientific notation (write 0.0001, never 1e-4)."""
+
+NEUTRALIZATIONS = ["MARKET", "SECTOR", "INDUSTRY", "SUBINDUSTRY"]
 
 SCHEMA = {
     "type": "object",
     "properties": {"alphas": {"type": "array", "maxItems": 6, "items": {
-        "type": "object", "properties": {"expr": {"type": "string"}, "idea": {"type": "string"}},
-        "required": ["expr", "idea"]}}},
+        "type": "object", "properties": {
+            "expr": {"type": "string"}, "idea": {"type": "string"},
+            "decay": {"type": "integer", "minimum": 0, "maximum": 20},
+            "neutralization": {"type": "string", "enum": NEUTRALIZATIONS}},
+        "required": ["expr", "idea", "decay", "neutralization"]}}},
     "required": ["alphas"],
 }
 
@@ -70,7 +73,7 @@ def _fields(conn, account, region, delay, dataset, k=40):
 
 
 def explore(conn: sqlite3.Connection, catalog: Catalog, account: str, ds: sqlite3.Row,
-            region: str = "USA", delay: int = 1) -> list[dict]:
+            region: str = "USA", delay: int = 1, theme=None) -> list[dict]:
     fields = _fields(conn, account, region, delay, ds["dataset"])
     if not fields:
         return []
@@ -80,6 +83,7 @@ def explore(conn: sqlite3.Connection, catalog: Catalog, account: str, ds: sqlite
 Fields:
 {lines}
 
+{hints.block(conn, account, region, ds['dataset'], theme)}
 Propose up to 6 distinct alphas."""
     out = chat_json([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
                     SCHEMA, max_tokens=2000, temperature=0.6)
@@ -87,10 +91,10 @@ Propose up to 6 distinct alphas."""
     for a in out.get("alphas", [])[:6]:
         chk = check(a["expr"], catalog, region)
         problems = list(chk.problems)
-        if chk.parsed and chk.datasets != [ds["dataset"]]:
-            problems.append(f"datasets {chk.datasets} != [{ds['dataset']}]")
+        if chk.parsed and (ds["dataset"] not in chk.datasets or len(chk.datasets) > 2):
+            problems.append(f"datasets {chk.datasets}: must use {ds['dataset']} plus at most one partner dataset")
         results.append({"expr": a["expr"], "idea": a.get("idea", ""), "check": chk, "valid": not problems,
-                        "problems": problems})
+                        "problems": problems, "decay": a.get("decay"), "neutralization": a.get("neutralization")})
     return results
 
 
@@ -104,10 +108,13 @@ def save(conn: sqlite3.Connection, ds: sqlite3.Row, results: list[dict], region:
             """insert or ignore into candidates(key, expr, region, delay, universe, neutralization, decay, truncation,
                    n_ops, n_fields, fields, categories, datasets, single_category, single_dataset, problems,
                    n_seen, sources, reasoning, family, flags, status)
-               values (?,?,?,?,?,?,4,0.08,?,?,?,?,?,1,1,'[]',1,?,?,?,'[]','explore')""",
-            (f"{region}|{delay}|{chk.canonical}", r["expr"], region, delay, markets.universe(region), markets.neutralization(region), chk.n_ops, len(chk.fields),
-             json.dumps(chk.fields), json.dumps(chk.categories), json.dumps(chk.datasets),
-             json.dumps([f"explore:{ds['dataset']}:{LLM_MODEL}"]), r["idea"],
+               values (?,?,?,?,?,?,?,0.08,?,?,?,?,?,?,?,'[]',1,?,?,?,'[]','explore')""",
+            (f"{region}|{delay}|{chk.canonical}", r["expr"], region, delay, markets.universe(region),
+             r.get("neutralization") if r.get("neutralization") in NEUTRALIZATIONS else markets.neutralization(region),
+             min(max(int(r["decay"]), 0), 20) if r.get("decay") is not None else 4,
+             chk.n_ops, len(chk.fields), json.dumps(chk.fields), json.dumps(chk.categories), json.dumps(chk.datasets),
+             int(chk.single_category), int(chk.single_dataset),
+             json.dumps([f"explore:{ds['dataset']}:{LLM_MODEL}:{hints.VERSION}"]), r["idea"],
              f"{region}|{delay}|" + ",".join(sorted(chk.fields))))
         added += cur.rowcount
     conn.commit()

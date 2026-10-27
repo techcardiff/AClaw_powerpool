@@ -261,7 +261,8 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     return len(picks)
 
 
-def explore_regions(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10) -> int:
+def explore_regions(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10,
+                    theme=None) -> int:
     """Keep a small stock of unsimulated explore ideas in every region the account has synced."""
     from .explore import explore, fresh_datasets, save as save_explore
     added = 0
@@ -273,7 +274,7 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
             continue
         for ds in fresh_datasets(conn, account, region)[:per_region]:
             try:
-                added += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds, region), region)
+                added += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds, region, theme=theme), region)
             except Exception as e:
                 log(f"  explore {region}/{ds['dataset']} failed: {e}")
     return added
@@ -311,7 +312,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
-    n = explore_regions(conn, catalog, account, list(regions))
+    n = explore_regions(conn, catalog, account, list(regions), theme=theme)
     if n:
         log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
     if theme is not None and theme.regions:

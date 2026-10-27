@@ -15,6 +15,7 @@ import sqlite3
 from .catalog import Catalog
 from .explore import _fields
 from .llm import LLM_MODEL, chat_json
+from . import hints
 from .pp import check
 from .theme import sub_sharpes
 
@@ -30,7 +31,8 @@ its simulation. Keep the economic idea, change ONE or TWO things that address th
 - high turnover: slower windows, ts_decay_linear, ts_mean smoothing
 - concentrated weight: rank(...) or group_rank(...) instead of raw values
 - weak recent years: prefer slower, more fundamental horizons
-Rules: <= 8 operators, <= 3 fields, only fields from the list, VECTOR fields need vec_avg/vec_sum,
+Rules: <= 8 operators, <= 3 fields, only fields from the lists (one proven partner field from another
+dataset is allowed), VECTOR fields need vec_avg/vec_sum,
 no scientific notation (write 0.0001, never 1e-4). Positive values = long."""
 
 SCHEMA = {"type": "object", "properties": {"revisions": {"type": "array", "maxItems": 2, "items": {
@@ -97,6 +99,7 @@ Result: {_metrics(row)}
 Fields available in {ds}:
 {lines}
 
+{hints.block(conn, account, row["region"], ds, theme)}
 {_theme_goal(row, theme) if gap is not None else ""}
 Propose up to 2 revisions."""
     out = chat_json([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
@@ -116,7 +119,8 @@ def save(conn: sqlite3.Connection, catalog: Catalog, parent, revisions: list[dic
     added = 0
     for v in revisions:
         chk = check(v["expr"], catalog, parent["region"])
-        if not chk.shape_ok or chk.datasets != ds or chk.unknown_ops:
+        # the parent's dataset, plus at most one proven partner dataset
+        if not chk.shape_ok or not set(ds) <= set(chk.datasets) or len(set(chk.datasets) - set(ds)) > 1 or chk.unknown_ops:
             continue
         cur = conn.execute(
             """insert or ignore into candidates(key, expr, region, delay, universe, neutralization, decay, truncation,
@@ -126,7 +130,7 @@ def save(conn: sqlite3.Connection, catalog: Catalog, parent, revisions: list[dic
             (f"{parent['region']}|{parent['delay']}|{chk.canonical}", v["expr"], parent["region"], parent["delay"],
              parent["universe"], parent["neutralization"], parent["decay"], parent["truncation"], chk.n_ops,
              len(chk.fields), json.dumps(chk.fields), json.dumps(chk.categories), json.dumps(chk.datasets),
-             int(chk.single_category), int(chk.single_dataset), json.dumps([f"revise:{parent['id']}:{LLM_MODEL}"]),
+             int(chk.single_category), int(chk.single_dataset), json.dumps([f"revise:{parent['id']}:{LLM_MODEL}:{hints.VERSION}"]),
              f"{(parent['reasoning'] or '')[:300]} | revision: {v['change']}",
              f"{parent['region']}|{parent['delay']}|" + ",".join(sorted(chk.fields)), parent["id"],
              (parent["depth"] or 0) + 1))
