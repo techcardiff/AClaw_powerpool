@@ -125,7 +125,7 @@ def gems(conn, account: str, region: str, dataset: str | None = None, exclude: s
 
 
 def proven_pairs(conn, region: str, fields: set[str], k: int = 6,
-                 exclude: list[tuple[str, int]] = ()) -> list[tuple[str, str, int, float]]:
+                 exclude: list = ()) -> list[tuple[str, str, int, float]]:
     """Proven pairs that involve any of `fields` (USA evidence for other regions); pairs
     with a field overused in our submitted alphas (`exclude`, hints.overused) are left out."""
     g = graph(conn)
@@ -154,7 +154,7 @@ def _fmt(r: dict, region: str) -> str:
 
 
 def block(conn, account: str, region: str, dataset: str | None = None, avoid: set[str] = frozenset(),
-          overused: list[tuple[str, int]] = ()) -> str:
+          overused: list = ()) -> str:
     """Prompt section: hidden gems (this dataset first, then partners from other datasets),
     their proven pairs, and crowded hubs to avoid. Families in `avoid` (our submitted
     alphas' field stems) are left out: they would fail Power Pool correlation; pairs and

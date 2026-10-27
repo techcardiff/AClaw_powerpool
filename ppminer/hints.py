@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from collections import Counter
 
 from . import kg
@@ -100,11 +101,20 @@ def theme_goal(theme, region: str) -> str:
     return goal + "\n"
 
 
-# A field (or specific field family) in this many of the team's submitted alphas is overused:
-# Qwen never sees it (field lists, pairs) and is told to avoid it. cap and adv20 stay: the size-bucket and
-# liquid-names fixes above use them for grouping, not as signal.
+# Fields the team's submitted alphas already use (shared correlation pool) are judged by
+# evidence, not by count: BRAIN's Power Pool correlation results on our alphas using them.
+#   hidden    >= MIN_TESTS correlation results and < MIN_PASS_RATE of them pass, or, with
+#             fewer results, used in >= HIDE_UNTESTED submitted alphas: Qwen never sees it
+#   careful   any other field used in >= OVERUSED submitted alphas: shown with its count and
+#             pass rate, to be combined with a new partner field and a different structure
+# cap and adv20 never count: the size-bucket and liquid-names fixes use them for grouping.
 OVERUSED = 3
+MIN_TESTS = 10
+MIN_PASS_RATE = 0.25
+HIDE_UNTESTED = 20
 FIX_FIELDS = {"cap", "adv20"}
+CACHE_SECONDS = 3600
+_CACHE: dict = {"at": 0.0, "tiers": None}
 
 
 def submitted_usage(conn: sqlite3.Connection) -> Counter:
@@ -123,35 +133,78 @@ def submitted_fields(conn: sqlite3.Connection) -> Counter:
     return out
 
 
-def _avoid(conn: sqlite3.Connection) -> list[tuple[str, int]]:
-    """(name, uses) to avoid, most used first: a family 'x_y*' when its name is specific (has
-    an underscore: horizon variants of one signal), else the exact field - a family like
-    'fnd6' would also hide unrelated fnd6_* fields, including proven ones."""
+def _used(conn: sqlite3.Connection) -> list[tuple[str, int]]:
+    """(name, uses) of fields in >= OVERUSED submitted alphas, most used first: a family 'x_y*'
+    when its name is specific (has an underscore: horizon variants of one signal), else the
+    exact field - a family like 'fnd6' would also cover unrelated fnd6_* fields."""
     fams = [(f"{s}*", n) for s, n in submitted_usage(conn).items() if n >= OVERUSED and "_" in s and s not in FIX_FIELDS]
     fields = [(f, n) for f, n in submitted_fields(conn).items() if n >= OVERUSED and f not in FIX_FIELDS
               and not any(f.startswith(x[:-1] + "_") for x, _ in fams)]
     return sorted(fams + fields, key=lambda x: -x[1])
 
 
-def is_overused(field: str, avoid: list[tuple[str, int]]) -> bool:
-    return any(field == x or (x.endswith("*") and field.startswith(x[:-1] + "_")) for x, _ in avoid)
+def is_overused(field: str, avoid: list) -> bool:
+    """`avoid`: (name, ...) tuples, name an exact field or a family 'x*'."""
+    return any(field == x[0] or (x[0].endswith("*") and field.startswith(x[0][:-1] + "_")) for x in avoid)
 
 
-def overused(conn: sqlite3.Connection) -> list[tuple[str, int]]:
-    return _avoid(conn)
+def correlation_evidence(conn: sqlite3.Connection, names: list[str]) -> dict[str, tuple[int, int]]:
+    """name -> (Power Pool correlation results, passes) over our alphas using that field."""
+    out = {n: [0, 0] for n in names}
+    for fields, checks in conn.execute("""select k.fields, r.checks from resims r join candidates k on k.id = r.candidate_id
+                                          where r.status='done' and r.checks like '%POWER_POOL_CORRELATION%'"""):
+        ppc = next((c for c in json.loads(checks or "[]") or [] if c.get("name") == "POWER_POOL_CORRELATION"), {})
+        if ppc.get("result") not in ("PASS", "FAIL", "WARNING"):
+            continue
+        fs = json.loads(fields or "[]")
+        for n in names:
+            if any(is_overused(f, [(n,)]) for f in fs):
+                out[n][0] += 1
+                out[n][1] += ppc["result"] == "PASS"
+    return {n: (t, p) for n, (t, p) in out.items()}
+
+
+def tiers(conn: sqlite3.Connection) -> dict[str, list[tuple[str, int, int, int]]]:
+    """{"hidden": [...], "careful": [...]} of (name, submitted uses, correlation results, passes)."""
+    if _CACHE["tiers"] is not None and time.time() - _CACHE["at"] < CACHE_SECONDS:
+        return _CACHE["tiers"]
+    used = _used(conn)
+    ev = correlation_evidence(conn, [n for n, _ in used])
+    out = {"hidden": [], "careful": []}
+    for n, uses in used:
+        t, p = ev[n]
+        saturated = (t >= MIN_TESTS and p / t < MIN_PASS_RATE) or (t < MIN_TESTS and uses >= HIDE_UNTESTED)
+        out["hidden" if saturated else "careful"].append((n, uses, t, p))
+    _CACHE.update(at=time.time(), tiers=out)
+    return out
+
+
+def overused(conn: sqlite3.Connection) -> list[tuple[str, int, int, int]]:
+    """Fields Qwen never sees (field lists, proven pairs)."""
+    return tiers(conn)["hidden"]
+
+
+def _ev(uses: int, t: int, p: int) -> str:
+    return f"in {uses} submitted, " + (f"{round(100 * p / t)}% of {t} new alphas passed PP correlation" if t
+                                        else "no correlation results yet")
 
 
 def overused_note(conn: sqlite3.Connection, k: int = 18) -> str:
-    top = _avoid(conn)[:k]
-    if not top:
-        return ""
-    return ("[OVERUSED IN OUR SUBMITTED ALPHAS - fails Power Pool correlation; never use these fields\n"
-            " (x* = every horizon variant x_...); number = submitted alphas using it]\n  "
-            + ", ".join(f"{s} ({n})" for s, n in top) + "\n")
+    tr = tiers(conn)
+    out = ""
+    if tr["hidden"]:
+        out += ("[USED UP IN OUR SUBMITTED ALPHAS - new alphas on them keep failing Power Pool correlation;\n"
+                " never use these (x* = every horizon variant x_...)]\n"
+                + "\n".join(f"  {n} ({_ev(u, t, p)})" for n, u, t, p in tr["hidden"][:k]) + "\n")
+    if tr["careful"]:
+        out += ("[IMPORTANT BUT ALREADY IN OUR SUBMITTED ALPHAS - usable: pair it with a NEW partner field\n"
+                " (not one it is already combined with) and a different structure, never a re-wrap of a known alpha]\n"
+                + "\n".join(f"  {n} ({_ev(u, t, p)})" for n, u, t, p in tr["careful"][:k]) + "\n")
+    return out
 
 
 def block(conn: sqlite3.Connection, account: str, region: str, dataset: str | None = None, theme=None) -> str:
-    # hidden gems leave out every family we submitted at all; field lists and pairs leave out the overused ones
+    # hidden gems leave out every family we submitted at all; field lists and pairs leave out the used-up ones
     return (RULES + examples(conn, region)
             + kg.block(conn, account, region, dataset, set(submitted_usage(conn)), overused(conn))
             + overused_note(conn) + theme_goal(theme, region))
