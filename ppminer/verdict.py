@@ -110,11 +110,14 @@ QUALITY_DEFAULTS = {
     "max_turnover": 0.4,               # trading cost
     "min_2y_sharpe": 1.0,              # the edge is still alive recently
     "min_sub_universe_sharpe": 0.7,    # not only the most liquid names
-    "concentrated_weight": True,       # CONCENTRATED_WEIGHT must not fail
+    "concentrated_weight": True,       # CONCENTRATED_WEIGHT must not FAIL or WARN
+    "max_fitness": 6.0,                # beyond this the result is implausible (near-zero divisors, few names)
+    "max_returns": 1.0,                # annual return; 301% with 50% in one stock was a degenerate alpha
 }
 
 
-def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict | None = None) -> list[str]:
+def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict | None = None,
+                 returns: float | None = None) -> list[str]:
     """Reasons an alpha falls below the auto-submit quality bar ([] = passes)."""
     b = dict(QUALITY_DEFAULTS, **(bar or {}))
     checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
@@ -130,6 +133,10 @@ def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict |
         out.append(f"last-2y sharpe {v} < {b['min_2y_sharpe']}")
     if (v := val("LOW_SUB_UNIVERSE_SHARPE")) is not None and v < b["min_sub_universe_sharpe"]:
         out.append(f"sub-universe sharpe {v} < {b['min_sub_universe_sharpe']}")
-    if b["concentrated_weight"] and (checks.get("CONCENTRATED_WEIGHT") or {}).get("result") == "FAIL":
-        out.append("concentrated weight")
+    if b["concentrated_weight"] and (checks.get("CONCENTRATED_WEIGHT") or {}).get("result") in ("FAIL", "WARNING"):
+        out.append(f"concentrated weight ({(checks.get('CONCENTRATED_WEIGHT') or {}).get('value')})")
+    if fitness is not None and fitness > b["max_fitness"]:
+        out.append(f"fitness {fitness} > {b['max_fitness']} (implausible)")
+    if returns is not None and returns > b["max_returns"]:
+        out.append(f"returns {returns} > {b['max_returns']} (implausible)")
     return out

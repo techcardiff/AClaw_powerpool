@@ -68,10 +68,16 @@ def single_submitter():
 def _candidates(conn, account: str) -> list[sqlite3.Row]:
     """Proposed/approved picks, approved first, then best score."""
     return conn.execute("""
-        select p.*, r.expr, r.settings, r.sharpe, c.region from picks p
+        select p.*, r.expr, r.settings, r.sharpe, r.checks, c.region from picks p
         join resims r on r.id = p.resim_id join candidates c on c.id = p.candidate_id
         where p.account=? and p.status in ('approved', 'proposed')
         order by case p.status when 'approved' then 0 else 1 end, p.score desc""", (account,)).fetchall()
+
+
+def pp_themes(checks_json: str | None) -> list[str]:
+    """Active Power Pool themes this alpha matches, as BRAIN's own check reports them."""
+    checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
+    return [t["name"] for t in (checks.get("MATCHES_THEMES") or {}).get("themes", []) if "power pool" in t["name"].lower()]
 
 
 def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None) -> dict:
@@ -89,7 +95,10 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         return {"status": "quota_full", "submitted": 0}
     after_batch(conn, catalog, brain, account)        # recheck, PnL, pick list, draft descriptions
     submitted, tried = 0, 0
-    for p in _candidates(conn, account):
+    # theme-matching picks first: before week 6 the theme is optional, but matching alphas
+    # also count toward the theme's leaderboard (sorted() keeps the existing order otherwise)
+    cands = sorted(_candidates(conn, account), key=lambda p: not pp_themes(p["checks"]))
+    for p in cands:
         if submitted >= q0.remaining:
             break
         tried += 1
@@ -107,7 +116,7 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         if v != "pp_ok" or ppc != "PASS":
             _log(conn, account, q.today, "skip", aid, cid, f"fresh check: {v} {why} PPC={ppc}")
             continue
-        low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality)
+        low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality, returns=s.get("returns"))
         if low:
             # the Power Pool rule is only sharpe 1.0; income follows quality, so weak alphas wait
             _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
@@ -134,7 +143,8 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         conn.execute("update picks set status='submitted', decided_at=current_timestamp, note=? where alpha_id=?",
                      (f"auto {res.get('dateSubmitted')}", aid))
         conn.commit()
-        _log(conn, account, q.today, "submitted", aid, cid, f"sharpe {s['sharpe']} TO {s['turnover']} at {res.get('dateSubmitted')}")
+        _log(conn, account, q.today, "submitted", aid, cid, f"sharpe {s['sharpe']} TO {s['turnover']} at {res.get('dateSubmitted')}"
+             f" | theme: {', '.join(pp_themes(chk)) or 'none'}")
         submitted += 1
     return {"status": "done", "submitted": submitted, "tried": tried, "quota_left_before": q0.remaining}
 

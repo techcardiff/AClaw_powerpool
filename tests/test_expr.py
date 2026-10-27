@@ -164,3 +164,13 @@ def test_template_field_order_and_picked_fields():
     assert s2 and all("other" not in r["expr"] for r in s2)          # no cross-dataset pairs
     s1 = generate(conn, cat, "A", "EUR", "s1", fields=["pop", "other"])
     assert {d for r in s1 for d in r["datasets"]} == {"d1", "d2"} and all(not r["problems"] for r in s1)
+
+
+def test_quality_gate_blocks_degenerate_alpha():
+    import json
+    from ppminer.verdict import quality_gate
+    # pwv2QXVj, 26 Oct: sharpe 3.88, fitness 14.9, returns 301%, half the weight in one stock
+    chk = json.dumps([{"name": "CONCENTRATED_WEIGHT", "result": "WARNING", "value": 0.5},
+                      {"name": "LOW_SUB_UNIVERSE_SHARPE", "value": 3.77}])
+    low = quality_gate(3.88, 14.91, 0.2042, chk, returns=3.0149)
+    assert any("concentrated" in x for x in low) and any("fitness" in x for x in low) and any("returns" in x for x in low)
