@@ -35,6 +35,17 @@ LOGIN_POLL_SECONDS = 300
 # without checks and rechecked later (after_batch), like a PENDING check.
 CHECK_WAIT_SECONDS = 180
 
+# BRAIN's own failures, not the alpha's: its generic "error while running the simulation.
+# Please try again" (27 Oct 16:00-18:40: ~340 sims, whole multi-simulations of any content,
+# both accounts) and CANCELLED (siblings of a child that errored). Such a job is put back
+# up to MAX_RETRIES times; an alpha error (invalid field, wrong inputs...) stays an error.
+TRANSIENT = re.compile(r"Please try again|CANCELLED|rate limited too long")
+MAX_RETRIES = 3
+# a batch whose sims nearly all failed this way means BRAIN is struggling: the account
+# waits instead of burning the retries of the next batch too
+PAUSE_SHARE = 0.9
+PAUSE_SECONDS = 20 * 60
+
 
 def checked(brain: Brain, alpha: dict) -> dict:
     """summarize() with BRAIN's checks, or without them when /check runs past the cap."""
@@ -42,6 +53,31 @@ def checked(brain: Brain, alpha: dict) -> dict:
         return summarize(alpha, brain.check(alpha["id"], max_wait=CHECK_WAIT_SECONDS))
     except TimeoutError:
         return summarize(alpha)
+
+
+def requeue_failed(conn, row, msg: str) -> bool:
+    """Put a job back that failed on BRAIN's side; False when it is the alpha's error or
+    the job already had MAX_RETRIES tries. Lane A/C jobs are deleted so the next batch
+    picks the candidate (or the funnel fix) again; manual jobs (lane M) go back in the queue."""
+    if not TRANSIENT.search(msg or ""):
+        return False
+    key = (row["account"], row["candidate_id"], row["expr"])
+    n = (conn.execute("select n from sim_retries where account=? and candidate_id=? and expr=?", key).fetchone() or [0])[0]
+    if n >= MAX_RETRIES:
+        return False
+    conn.execute("""insert into sim_retries(account, candidate_id, expr, n, last_error) values (?,?,?,1,?)
+                    on conflict(account, candidate_id, expr) do update set n=n+1, last_error=excluded.last_error,
+                    updated_at=current_timestamp""", key + (msg[:300],))
+    if row["lane"] == "M":
+        conn.execute("update resims set status='queued' where id=?", (row["id"],))
+    else:
+        conn.execute("delete from resims where id=?", (row["id"],))
+    return True
+
+
+def paused_until(conn, account: str) -> float:
+    row = conn.execute("select value from runner_state where key=?", (f"brain_pause:{account}",)).fetchone()
+    return float(json.loads(row[0])) if row else 0.0
 
 
 def log(msg: str) -> None:
@@ -150,7 +186,7 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
                 out.append((j, e))
         return out
 
-    stats = {"done": 0, "error": 0, "requeued": 0, "pp_ok": 0, "reg_ok": 0, "market": 0}
+    stats = {"done": 0, "error": 0, "requeued": 0, "retry": 0, "pp_ok": 0, "reg_ok": 0, "market": 0}
     expired = False
     chunks = _chunks(rows, ids)
     with ThreadPoolExecutor(max(1, slots)) as ex:
@@ -196,6 +232,10 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
                 r = rows[i]
                 if isinstance(s, Exception):
                     msg = str(s)
+                    if requeue_failed(conn, r, msg):
+                        conn.commit()
+                        stats["retry"] += 1
+                        continue
                     conn.execute("update resims set status='error', error=? where id=?", (msg[:500], i))
                     if m := re.search(r"Invalid data field (\w+)", msg):
                         block(conn, account, m.group(1), "BRAIN: invalid data field")
@@ -336,6 +376,8 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     if brain is None:
         lanes.set_state(conn, status="waiting_login", account=account)
         return {"status": "waiting_login", "sims": 0}
+    if paused_until(conn, account) > time.time():
+        return {"status": "paused", "sims": 0}
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
@@ -366,6 +408,9 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     n_picks = after_batch(conn, catalog, brain, account)
     lanes.set_state(conn, status="idle", account=account, last_batch=st, picks=n_picks)
     log(f"[{account}] batch done: {st} | picks {n_picks}")
+    if st["retry"] >= PAUSE_SHARE * len(ids):
+        lanes.set_state(conn, **{f"brain_pause:{account}": time.time() + PAUSE_SECONDS})
+        log(f"[{account}] BRAIN failed {st['retry']}/{len(ids)} sims on its side; pausing {PAUSE_SECONDS // 60} min")
     return {"status": "ok", "sims": st["done"] + st["error"]}
 
 

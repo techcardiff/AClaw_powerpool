@@ -135,5 +135,5 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
 
         with ThreadPoolExecutor(len(accounts)) as ex:
             results = list(ex.map(mine, accounts))
-        if all(r["status"] in ("waiting_login", "empty") for r in results):
+        if all(r["status"] in ("waiting_login", "empty", "paused") for r in results):
             time.sleep(LOGIN_POLL_SECONDS)

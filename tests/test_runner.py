@@ -26,3 +26,34 @@ def test_untested_ideas_newest_first():
                   (i + 1, f"rank(f{i})", "USA", 1, json.dumps([f"f{i}"]), json.dumps([ds]), "[]", single, None, None,
                    "explore", f"rank(f{i})"))
     assert [r["id"] for r in shortlist(c, None, n=3, statuses=("explore",))] == [3, 2, 1]
+
+
+def _jobs_db():
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.execute("""create table resims (id integer primary key, candidate_id int, account text, expr text, status text,
+                 error text, lane text)""")
+    from ppminer import lanes
+    c.execute(lanes.MIGRATIONS[-1])
+    return c
+
+
+def test_brain_side_failures_retry_up_to_limit():
+    c = _jobs_db()
+    msg = "simulation failed: ERROR There was an error while running the simulation. Please try again or contact BRAIN"
+    for attempt in range(runner.MAX_RETRIES):
+        c.execute("insert into resims(id, candidate_id, account, expr, status, lane) values (1, 7, 'A1', 'rank(x)', 'running', 'A')")
+        assert runner.requeue_failed(c, c.execute("select * from resims where id=1").fetchone(), msg)
+        assert c.execute("select count(*) from resims").fetchone()[0] == 0        # picked again next batch
+    c.execute("insert into resims(id, candidate_id, account, expr, status, lane) values (1, 7, 'A1', 'rank(x)', 'running', 'A')")
+    assert not runner.requeue_failed(c, c.execute("select * from resims where id=1").fetchone(), msg)
+
+
+def test_alpha_errors_and_manual_jobs():
+    c = _jobs_db()
+    c.execute("insert into resims values (1, 7, 'A1', 'rank(x)', 'running', null, 'A')")
+    c.execute("insert into resims values (2, 8, 'A1', 'rank(y)', 'running', null, 'M')")
+    assert not runner.requeue_failed(c, c.execute("select * from resims where id=1").fetchone(),
+                                     "simulation failed: ERROR Invalid number of inputs : 1, should be exactly 2")
+    assert runner.requeue_failed(c, c.execute("select * from resims where id=2").fetchone(), "simulation failed: CANCELLED ")
+    assert c.execute("select status from resims where id=2").fetchone()[0] == "queued"

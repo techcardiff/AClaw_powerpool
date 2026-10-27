@@ -32,6 +32,9 @@ MIGRATIONS = [
         account text, alpha_id text, expr text, canon text, stems text, tags text,
         sharpe real, date_submitted text, primary key (account, alpha_id))""",
     "create table if not exists runner_state (key text primary key, value text, updated_at timestamp default current_timestamp)",
+    """create table if not exists sim_retries (
+        account text, candidate_id integer, expr text, n integer, last_error text,
+        updated_at timestamp default current_timestamp, primary key (account, candidate_id, expr))""",
 ]
 
 
