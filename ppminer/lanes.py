@@ -170,7 +170,22 @@ def saturated_datasets(conn: sqlite3.Connection, account: str, min_fails: int = 
     return {d for d, (f, p) in stats.items() if f >= min_fails and f / (f + p) >= rate}
 
 
-def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = ()) -> list[sqlite3.Row]:
+# With an active Power Pool theme, this share of Lane A goes to candidates that match it
+# (any source); the source groups below fill the rest and any theme slots left empty.
+THEME_SHARE = 0.5
+
+
+def theme_datasets(conn: sqlite3.Connection, theme, accounts: list[str]) -> set[str]:
+    """Dataset lists (candidates.datasets) these accounts have simulated or queued in the theme's region(s)."""
+    if not accounts or not theme.regions:
+        return set()
+    return {r[0] for r in conn.execute(
+        f"""select distinct k.datasets from resims r join candidates k on k.id = r.candidate_id
+            where r.account in ({','.join('?' * len(accounts))}) and k.region in ({','.join('?' * len(theme.regions))})""",
+        (*accounts, *sorted(theme.regions)))}
+
+
+def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (), theme=None) -> list[sqlite3.Row]:
     pp, _ = collide_stems(conn, account)
     o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
     common = dict(account=account, skip_done=True, exclude_stems=pp | o_stems,
@@ -188,6 +203,12 @@ def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (
                 picked.append(r)
                 k -= 1
 
+    if theme is not None:
+        # both accounts chase the same theme in one correlation pool: a theme dataset
+        # the other account already simulates is left to it
+        taken = theme_datasets(conn, theme, [o for o in others if o != account])
+        rows = [r for r in shortlist(conn, theme, n=n * 3, statuses=LANE_A_STATUSES, **common) if r["datasets"] not in taken]
+        take(_without(rows, o_ids, n), round(n * THEME_SHARE))
     for rows, (_, share) in zip(pools, LANE_A_GROUPS):
         take(rows, max(1, round(n * share)))
     for rows in pools:                       # unused slots: strongest source first

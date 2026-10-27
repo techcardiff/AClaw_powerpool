@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from .theme import matched_pp_themes
+
 
 def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool = False) -> tuple[str, list[str]]:
     """Returns (status, reasons): status is pp_ok | risky | pending | not_pp.
@@ -21,8 +23,7 @@ def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool =
         # WARNING = above 0.5 with an alpha already in the Power Pool; only eligible with
         # sharpe >= 10% above that alpha, which BRAIN decides at submission
         reasons.append(f"PP correlation {ppc.get('value', '?')} > {ppc.get('limit', 0.5)}")
-    themes = [t["name"] for t in (checks.get("MATCHES_THEMES") or {}).get("themes", []) if "power pool" in t["name"].lower()]
-    if not themes and require_theme:
+    if require_theme and not matched_pp_themes(list(checks.values())):
         reasons.append("no Power Pool theme")
     if not ppc and res("CONCENTRATED_WEIGHT") == "FAIL":
         # BRAIN never computes the correlation checks for these, they stay PENDING forever

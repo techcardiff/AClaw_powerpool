@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import cookies as ck
-from . import lanes, marketx, revise
+from . import lanes, marketx, revise, templates
 from .brain import AuthRequired, Brain, settings_for, summarize
 from .catalog import Catalog
 from .fields import block
@@ -49,7 +49,7 @@ def _enqueue(conn, account, lane, purpose, cand_id, expr, settings, parent=None)
                         (cand_id, account, expr, json.dumps(settings), lane, purpose, parent)).lastrowid
 
 
-def build_batch(conn, account: str, size: int, c_share: float, others: list[str] = ()) -> list[int]:
+def build_batch(conn, account: str, size: int, c_share: float, others: list[str] = (), theme=None) -> list[int]:
     from . import funnel
     # manual jobs from the Search page run first, in the order they were queued
     ids = [r[0] for r in conn.execute("""select id from resims where account=? and status='queued' and lane='M'
@@ -58,7 +58,7 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     if size <= 0:
         return ids
     n_c = max(1, round(size * c_share))
-    rows_a = lanes.lane_a(conn, account, size - n_c, others)
+    rows_a = lanes.lane_a(conn, account, size - n_c, others, theme)
     for r in rows_a:
         purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
@@ -278,9 +278,30 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
     return added
 
 
+def theme_ideas(conn, catalog, account: str, theme, others: list[str] = (), min_datasets: int = 6,
+                per_pass: int = 3) -> int:
+    """Keep untested template alphas (Search 1) on enough datasets of the theme's region(s)
+    for Lane A's theme share: the harvested inventory barely covers regions like GLB.
+    The shortlist takes at most 2 untested ideas per dataset, hence the dataset count."""
+    from .explore import fresh_datasets
+    added = 0
+    for region in sorted(theme.regions):
+        taken = lanes.theme_datasets(conn, theme, [o for o in others if o != account])   # the other account's
+        open_ds = {r[0] for r in conn.execute("""select distinct c.datasets from candidates c where c.status in ('template', 'explore')
+                                  and c.region=? and not exists (select 1 from resims r where r.candidate_id=c.id and r.account=?)""",
+                                              (region, account))} - taken
+        if len(open_ds) >= min_datasets:
+            continue
+        for ds in fresh_datasets(conn, account, region, theme.delay or 1, theme.categories or None)[:per_pass]:
+            rows = templates.generate(conn, catalog, account, region, "s1", ds["dataset"], 3, order="fresh") \
+                or templates.generate(conn, catalog, account, region, "s1", ds["dataset"], 3, order="coverage")
+            added += templates.save(conn, region, rows, theme.delay or 1, source=f"theme:{theme.name}")
+    return added
+
+
 def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
           regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9,
-          market_regions: list[str] | None = None) -> dict:
+          market_regions: list[str] | None = None, theme=None) -> dict:
     """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
     brain = _brain(account)
     if brain is None:
@@ -292,7 +313,11 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     n = explore_regions(conn, catalog, account, list(regions))
     if n:
         log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
-    ids = build_batch(conn, account, min(batch, sims_left), c_share, others)
+    if theme is not None and theme.regions:
+        n = theme_ideas(conn, catalog, account, theme, others)
+        if n:
+            log(f"[{account}] theme {theme.name}: {n} new template alphas")
+    ids = build_batch(conn, account, min(batch, sims_left), c_share, others, theme)
     if not ids:
         return {"status": "empty", "sims": 0}
     lanes.set_state(conn, status="simulating", account=account, batch=len(ids))

@@ -25,6 +25,7 @@ from . import cookies as ck, lanes, ppcorr
 from .brain import Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
+from .theme import matched_pp_themes
 from .quota import DAILY_SUBMISSION_LIMIT, ny_now, quota
 from .verdict import QUALITY_DEFAULTS, quality_gate, verdict
 
@@ -76,8 +77,7 @@ def _candidates(conn, account: str) -> list[sqlite3.Row]:
 
 def pp_themes(checks_json: str | None) -> list[str]:
     """Active Power Pool themes this alpha matches, as BRAIN's own check reports them."""
-    checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
-    return [t["name"] for t in (checks.get("MATCHES_THEMES") or {}).get("themes", []) if "power pool" in t["name"].lower()]
+    return matched_pp_themes(checks_json)
 
 
 def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None) -> dict:

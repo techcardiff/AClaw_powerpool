@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import cookies as ck, sandbox
 from .verdict import regular_verdict, verdict
+from .theme import matched_pp_themes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SONG_PORT = int(os.getenv("PP_SONG_PORT", "5071"))      # Song's sandbox dashboard, shown under /song/
@@ -87,9 +88,7 @@ def snapshot(db_path: str) -> dict:
             if r["reg_verdict"] in ("reg_ok", "near", "pending"):
                 out["regular"].append({k: r[k] for k in ("alpha_id", "candidate_id", "account", "expr", "sharpe", "fitness",
                                                          "turnover", "lane", "purpose", "reg_verdict", "reg_fails", "datasets")})
-            ch = {c.get("name"): c for c in json.loads(r["checks"] or "[]") or []}
-            r["themes"] = [t["name"] for t in (ch.get("MATCHES_THEMES") or {}).get("themes", [])
-                           if "power pool" in t["name"].lower()]
+            r["themes"] = matched_pp_themes(r["checks"])
         r.pop("checks", None)
     out["version"] = SERVER_VERSION
     return out
