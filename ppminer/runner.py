@@ -197,11 +197,11 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
     return stats
 
 
-def do_revisions(conn, catalog, account: str, limit: int, workers: int = 4) -> int:
-    rows = revise.todo(conn, account)[:limit]
+def do_revisions(conn, catalog, account: str, limit: int, workers: int = 4, theme=None) -> int:
+    rows = revise.todo(conn, account, theme)[:limit]
     added = 0
     with ThreadPoolExecutor(workers) as ex:
-        futs = {ex.submit(revise.revise, _ro(conn), catalog, account, r): r for r in rows}
+        futs = {ex.submit(revise.revise, _ro(conn), catalog, account, r, theme): r for r in rows}
         for fu in as_completed(futs):
             r = futs[fu]
             try:
@@ -217,7 +217,8 @@ def do_revisions(conn, catalog, account: str, limit: int, workers: int = 4) -> i
 
 def _ro(conn):
     path = conn.execute("pragma database_list").fetchone()[2]
-    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    # handed to a worker thread (one connection per job), so not tied to the creating thread
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
     c.row_factory = sqlite3.Row
     return c
 
@@ -307,7 +308,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     if brain is None:
         lanes.set_state(conn, status="waiting_login", account=account)
         return {"status": "waiting_login", "sims": 0}
-    added = do_revisions(conn, catalog, account, limit=8)
+    added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
     n = explore_regions(conn, catalog, account, list(regions))

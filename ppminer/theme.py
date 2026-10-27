@@ -27,6 +27,7 @@ class Theme:
     categories: set[str] = field(default_factory=set)
     single_category: bool = False
     regions: set[str] = field(default_factory=set)   # empty = any
+    sub_sharpe: dict[str, float] = field(default_factory=dict)   # GLB part -> minimum Sharpe, e.g. {"AMER": 1.0}
     raw: str = ""
 
     def active_on(self, day: dt.date) -> bool:
@@ -57,6 +58,9 @@ def parse_theme(name: str, start: str, end: str, text: str) -> Theme:
     elif m := re.search(r"region\s*=\s*'?(\w+)", low):
         t.regions = {m.group(1).upper()}
     t.single_category = "single datacategory" in low or "single data category" in low
+    # 'AMER Sharpe > 1': the Sharpe of the alpha's Americas part of GLB (BRAIN check LOW_GLB_AMER_SHARPE)
+    for part, x in re.findall(r"\b(amer|emea|apac)\s+sharpe\s*>=?\s*([\d.]+)", low):
+        t.sub_sharpe[part.upper()] = float(x)
     return t
 
 
@@ -69,6 +73,18 @@ def load_themes(path: str) -> list[Theme]:
 def active_themes(themes: list[Theme], day: dt.date | None = None) -> list[Theme]:
     day = day or dt.date.today()
     return [t for t in themes if t.active_on(day)]
+
+
+def sub_sharpes(checks) -> dict[str, float]:
+    """GLB sub-region Sharpes from BRAIN's checks (LOW_GLB_AMER_SHARPE etc.): {"AMER": 0.58, ...}."""
+    if isinstance(checks, str) or checks is None:
+        checks = json.loads(checks or "[]") or []
+    out = {}
+    for c in checks:
+        m = re.fullmatch(r"LOW_GLB_([A-Z]+)_SHARPE", c.get("name", ""))
+        if m and c.get("value") is not None:
+            out[m.group(1)] = c["value"]
+    return out
 
 
 def matched_pp_themes(checks) -> list[str]:

@@ -51,3 +51,30 @@ def test_theme_datasets_of_other_account():
     t = th.from_name("GLB/D1 Power Pool Nov`26")
     assert theme_datasets(c, t, ["YO50689"]) == {'["model257"]'}
     assert theme_datasets(c, t, []) == set()
+
+
+def test_amer_rule_and_sub_sharpes():
+    t = th.parse_theme("GLB/D1 Power Pool Nov`26", "2026-10-26", "2026-11-29", "region=GLB & delay=1 & AMER Sharpe > 1")
+    assert t.regions == {"GLB"} and t.delay == 1 and t.sub_sharpe == {"AMER": 1.0}
+    checks = [{"name": "LOW_GLB_AMER_SHARPE", "result": "FAIL", "value": 0.58},
+              {"name": "LOW_GLB_APAC_SHARPE", "result": "FAIL", "value": 0.17}]
+    assert th.sub_sharpes(json.dumps(checks)) == {"AMER": 0.58, "APAC": 0.17}
+
+
+def test_revise_ranks_theme_rows_by_amer_sharpe():
+    from ppminer import revise
+    t = th.parse_theme("GLB/D1 Power Pool Nov`26", "2026-10-26", "2026-11-29", "region=GLB & delay=1 & AMER Sharpe > 1")
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript("""create table candidates (id integer primary key, status text, region text, depth int, parent_id int);
+                       create table resims (id integer primary key, candidate_id int, account text, status text,
+                                            sharpe real, fitness real, turnover real, checks text);
+                       create table llm_jobs (candidate_id int, kind text);""")
+    amer = lambda v: json.dumps([{"name": "LOW_GLB_AMER_SHARPE", "result": "FAIL", "value": v}])
+    for cid, status, region, sharpe, checks in ((1, "explore", "USA", 0.9, "[]"), (2, "template", "GLB", 0.4, amer(0.6)),
+                                                 (3, "template", "GLB", 0.7, amer(0.8)), (4, "template", "GLB", 0.5, amer(0.2)),
+                                                 (5, "template", "USA", 0.9, "[]")):
+        c.execute("insert into candidates values (?,?,?,0,null)", (cid, status, region))
+        c.execute("insert into resims(candidate_id, account, status, sharpe, checks) values (?, 'A', 'done', ?, ?)", (cid, sharpe, checks))
+    assert [r["id"] for r in revise.todo(c, "A", t)] == [3, 2, 1]   # AMER 0.2 is too far; USA templates stay out
+    assert [r["id"] for r in revise.todo(c, "A")] == [1]

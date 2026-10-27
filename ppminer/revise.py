@@ -16,10 +16,12 @@ from .catalog import Catalog
 from .explore import _fields
 from .llm import LLM_MODEL, chat_json
 from .pp import check
+from .theme import sub_sharpes
 
 MAX_DEPTH = 3
 FLIP_AT = 0.7
 DROP_BELOW = 0.3
+THEME_MIN_GAP = 0.5       # theme rows: revise from half the theme's sub-region Sharpe (AMER 0.5 for AMER > 1)
 
 SYSTEM = """You are a senior WorldQuant BRAIN researcher improving a Power Pool alpha after seeing
 its simulation. Keep the economic idea, change ONE or TWO things that address the failures:
@@ -36,15 +38,32 @@ SCHEMA = {"type": "object", "properties": {"revisions": {"type": "array", "maxIt
     "required": ["expr", "change"]}}}, "required": ["revisions"]}
 
 
-def todo(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
-    """Simulated explore ideas that missed the bar and have not been revised yet."""
-    return conn.execute("""
+def theme_gap(row, theme) -> float | None:
+    """For a result in the theme's region with sub-region Sharpe rules (e.g. AMER > 1):
+    the weakest sub-region Sharpe relative to its minimum, 1.0 = on the bar. None otherwise."""
+    if theme is None or not theme.sub_sharpe or row["region"] not in theme.regions:
+        return None
+    have = sub_sharpes(row["checks"])
+    return min((have.get(part, 0) or 0) / need for part, need in theme.sub_sharpe.items())
+
+
+def todo(conn: sqlite3.Connection, account: str, theme=None) -> list[sqlite3.Row]:
+    """Simulated explore ideas that missed the bar and have not been revised yet. With a theme
+    that sets sub-region Sharpe rules, template alphas in its region qualify too, and those
+    closest to the theme's bar go first."""
+    regions = sorted(theme.regions) if theme is not None and theme.sub_sharpe else []
+    rows = conn.execute(f"""
         select r.id as resim_id, r.sharpe as new_sharpe, r.fitness as new_fitness, r.turnover as new_turnover,
                r.checks, c.* from resims r join candidates c on c.id = r.candidate_id
-        where r.account=? and r.status='done' and c.status='explore' and coalesce(c.depth,0) < ?
+        where r.account=? and r.status='done' and coalesce(c.depth,0) < ?
+          and (c.status='explore' or (c.status='template' and c.region in ({','.join('?' * len(regions)) or "''"})))
           and not exists (select 1 from candidates k where k.parent_id = c.id)
           and not exists (select 1 from llm_jobs j where j.candidate_id = c.id and j.kind = 'revise')
-        order by abs(r.sharpe) desc""", (account, MAX_DEPTH)).fetchall()
+        order by abs(r.sharpe) desc""", (account, MAX_DEPTH, *regions)).fetchall()
+    gaps = {r["id"]: theme_gap(r, theme) for r in rows}
+    rows = [r for r in rows if gaps[r["id"]] is None or gaps[r["id"]] >= THEME_MIN_GAP or r["new_sharpe"] <= -FLIP_AT]
+    # theme rows first, closest to the theme's bar first; the rest keep their order
+    return sorted(rows, key=lambda r: (gaps[r["id"]] is None, -(gaps[r["id"]] or 0)))
 
 
 def mark(conn: sqlite3.Connection, candidate_id: int, ok: bool, note: str) -> None:
@@ -62,9 +81,10 @@ def _metrics(row) -> str:
             f"failing: {'; '.join(fails) or 'none besides sharpe'}")
 
 
-def revise(conn: sqlite3.Connection, catalog: Catalog, account: str, row) -> list[dict]:
+def revise(conn: sqlite3.Connection, catalog: Catalog, account: str, row, theme=None) -> list[dict]:
     sh = row["new_sharpe"] or 0
-    if abs(sh) < DROP_BELOW:
+    gap = theme_gap(row, theme)
+    if abs(sh) < DROP_BELOW and gap is None:
         return []
     if sh <= -FLIP_AT:
         return [{"expr": f"-({row['expr']})", "change": f"sign flip (sharpe was {sh})"}]
@@ -77,10 +97,18 @@ Result: {_metrics(row)}
 Fields available in {ds}:
 {lines}
 
+{_theme_goal(row, theme) if gap is not None else ""}
 Propose up to 2 revisions."""
     out = chat_json([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
                     SCHEMA, max_tokens=1500, temperature=0.5)
     return out.get("revisions", [])[:2]
+
+
+def _theme_goal(row, theme) -> str:
+    have = sub_sharpes(row["checks"])
+    parts = ", ".join(f"{p} Sharpe {have.get(p)} (needs > {need})" for p, need in theme.sub_sharpe.items())
+    return (f"Goal: the Power Pool theme '{theme.name}' ({theme.raw}) needs {parts}. Revise so the signal\n"
+            f"works on the Americas part of the global universe, not only on the overall Sharpe.\n")
 
 
 def save(conn: sqlite3.Connection, catalog: Catalog, parent, revisions: list[dict]) -> int:

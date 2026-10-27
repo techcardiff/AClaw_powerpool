@@ -10,5 +10,11 @@
     "start": "2026-10-12",
     "end": "2026-10-25",
     "rule": "delay=1 & datacategory in ['analyst', 'model', 'news'] & single datacategory"
+  },
+  {
+    "name": "GLB/D1 Power Pool Nov`26",
+    "start": "2026-10-26",
+    "end": "2026-11-29",
+    "rule": "region=GLB & delay=1 & AMER Sharpe > 1"
   }
 ]
