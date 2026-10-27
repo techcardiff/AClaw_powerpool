@@ -18,13 +18,15 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
               skip_ids: set[int] | None = None, exclude_datasets: set[str] | None = None) -> list[sqlite3.Row]:
     """Greedy: best |sharpe| first, one per family, capped per dataset and per
     operator shape so the list spreads across data and ideas.
-    Single-dataset (Power Pool + ATOM, outside the quota) ranks ahead.
+    Single-dataset (Power Pool + ATOM, outside the quota) ranks ahead. Untested ideas go
+    newest first: newer ones come from the latest prompts (hints.VERSION).
     theme=None is Lane A: any category/region (pure PP needs no theme in weeks 1-6).
     With an account, only alphas whose fields that account can use are picked."""
     from .fields import available
     q = f"""select * from candidates where status in ({','.join('?' * len(statuses))})
             and (family_rank = 1 or status in ('rewrite', 'explore', 'template'))
-            order by single_dataset desc, abs(coalesce(sharpe, 0)) desc, id"""
+            order by case when sharpe is null then 0 else single_dataset end desc, abs(coalesce(sharpe, 0)) desc,
+                     case when sharpe is null then -id else id end"""
     done = set()
     if account and skip_done:
         done = {r[0] for r in conn.execute("select candidate_id from resims where account=?", (account,))}

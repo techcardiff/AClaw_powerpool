@@ -81,7 +81,7 @@ def pp_themes(checks_json: str | None) -> list[str]:
 
 
 def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None) -> dict:
-    from .runner import after_batch
+    from .runner import CHECK_WAIT_SECONDS, after_batch, checked
     q0 = None
     brain = Brain.from_cookie(ck.load_cookie(account)) if account in ck.saved_accounts() else None
     if brain is None or not brain.is_authenticated():
@@ -103,7 +103,10 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
             break
         tried += 1
         aid, cid = p["alpha_id"], p["candidate_id"]
-        s = summarize(brain.alpha(aid), brain.check(aid))
+        s = checked(brain, brain.alpha(aid))
+        if "checks" not in s:
+            _log(conn, account, q.today, "skip", aid, cid, f"BRAIN check still running after {CHECK_WAIT_SECONDS}s; next run")
+            continue
         s["checks"] = ppcorr.fill(brain, conn, aid, s.get("checks") or [], account)   # when /check has no PP correlation
         chk = json.dumps(s.get("checks"))
         v, why = verdict(s["sharpe"], chk, require_theme=q.theme_required)

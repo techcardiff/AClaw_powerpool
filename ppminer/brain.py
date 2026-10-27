@@ -118,8 +118,8 @@ class Brain:
     def alpha(self, alpha_id: str) -> dict:
         return self._req("GET", f"{BASE}/alphas/{alpha_id}").json()
 
-    def check(self, alpha_id: str) -> dict:
-        return self._poll(f"{BASE}/alphas/{alpha_id}/check", max_wait=900)
+    def check(self, alpha_id: str, max_wait: int = 900) -> dict:
+        return self._poll(f"{BASE}/alphas/{alpha_id}/check", max_wait=max_wait)
 
     def set_description(self, alpha_id: str, text: str) -> dict:
         """Power Pool needs >= 100 chars in the alpha's regular description (Idea / Rationale)."""

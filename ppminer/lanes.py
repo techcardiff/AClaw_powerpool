@@ -89,6 +89,7 @@ def sync_submitted(conn: sqlite3.Connection, brain: Brain, account: str, catalog
                          (account, a["id"], expr, expr.replace(" ", ""), field_stems(expr, catalog, region),
                           json.dumps(a.get("tags")), (a.get("is") or {}).get("sharpe"), a.get("dateSubmitted")))
             n += 1
+        conn.commit()                        # per page: no write held open across BRAIN calls
         off += 100
         if off >= j.get("count", 0):
             break
@@ -221,10 +222,12 @@ REGULAR_SHARPE, REGULAR_FITNESS = 1.58, 1.0
 
 
 def lane_c(conn: sqlite3.Connection, account: str, n: int, others: list[str] = ()) -> list[sqlite3.Row]:
-    """Harvested alphas that already looked regular-grade in old sims (any shape)."""
+    """Harvested alphas that already looked regular-grade in old sims (any shape).
+    Not 'purify': those complex 3-5 dataset alphas failed CONCENTRATED_WEIGHT in 186 of
+    200 re-simulations (Oct 26-27: their old metrics don't hold on BRAIN today)."""
     _, own = collide_stems(conn, account)
     o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
-    statuses = ("pp_ready", "pp_multi", "purify", "rewrite")
+    statuses = ("pp_ready", "pp_multi", "rewrite")
     rows = shortlist(conn, None, n=n * 3 if o_ids else n, statuses=statuses, account=account, skip_done=True,
                      exclude_stems=own | o_stems, exclude_exprs=submitted_exprs(conn, account) | o_exprs,
                      min_sharpe=REGULAR_SHARPE, min_fitness=REGULAR_FITNESS,

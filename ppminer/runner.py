@@ -30,6 +30,18 @@ from .pp import submit_expr
 from .verdict import regular_verdict, verdict
 
 LOGIN_POLL_SECONDS = 300
+# BRAIN's /check sometimes never finishes; waiting its full 15 minutes held up whole cycles
+# (27 Oct: twice ~15 min in auto-submit). A result whose check is still running is saved
+# without checks and rechecked later (after_batch), like a PENDING check.
+CHECK_WAIT_SECONDS = 180
+
+
+def checked(brain: Brain, alpha: dict) -> dict:
+    """summarize() with BRAIN's checks, or without them when /check runs past the cap."""
+    try:
+        return summarize(alpha, brain.check(alpha["id"], max_wait=CHECK_WAIT_SECONDS))
+    except TimeoutError:
+        return summarize(alpha)
 
 
 def log(msg: str) -> None:
@@ -76,6 +88,17 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
             continue
         ids.append(_enqueue(conn, account, "C", "harvest-regular", r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
         room -= 1
+    # slots Lane C couldn't fill go back to Lane A
+    if room > 0:
+        taken = {r["id"] for r in rows_a}
+        for r in lanes.lane_a(conn, account, len(rows_a) + room, others, theme):
+            if room <= 0:
+                break
+            if r["id"] in taken:
+                continue
+            purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
+            ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
+            room -= 1
     conn.commit()
     return ids
 
@@ -108,7 +131,7 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
                 out.append((i, a))
                 continue
             try:
-                out.append((i, summarize(a, brain.check(a["id"]))))
+                out.append((i, checked(brain, a)))
             except AuthRequired:
                 raise
             except Exception as e:
@@ -120,7 +143,7 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
         out = []
         for j, a in zip(jobs, alphas):
             try:
-                out.append((j, a if isinstance(a, Exception) else summarize(a, brain.check(a["id"]))))
+                out.append((j, a if isinstance(a, Exception) else checked(brain, a)))
             except AuthRequired:
                 raise
             except Exception as e:
@@ -232,7 +255,9 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     fallbacks = 0
     for r in conn.execute("select * from resims where account=? and status='done' and lane is not null", (account,)).fetchall():
         if verdict(r["sharpe"], r["checks"])[0] == "pending":
-            s = summarize(brain.alpha(r["alpha_id"]), brain.check(r["alpha_id"]))
+            s = checked(brain, brain.alpha(r["alpha_id"]))
+            if "checks" not in s:
+                continue                     # check still running at BRAIN: stays pending for the next pass
             checks = s.get("checks") or []
             # BRAIN often never fills POWER_POOL_CORRELATION in /check; for alphas strong enough
             # to submit, estimate it from correlations/self (limited per cycle: one call each)
@@ -244,7 +269,9 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
                 except Exception as e:
                     log(f"  correlations/self for {r['alpha_id']} failed: {e}")
             conn.execute("update resims set checks=? where id=?", (json.dumps(checks), r["id"]))
-    conn.commit()
+            # commit each one: auto-submit runs this beside mining, and an open write held
+            # across BRAIN calls locked the other threads out ("database is locked")
+            conn.commit()
     if fallbacks:
         log(f"[{account}] Power Pool correlation estimated from correlations/self for {fallbacks} alphas")
     rows = passing(conn, account)
