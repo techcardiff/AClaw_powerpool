@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import cookies as ck, sandbox
 from .verdict import regular_verdict, verdict
-from .theme import matched_pp_themes
+from .theme import current as current_theme, theme_names
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SONG_PORT = int(os.getenv("PP_SONG_PORT", "5071"))      # Song's sandbox dashboard, shown under /song/
@@ -40,7 +40,7 @@ def snapshot(db_path: str) -> dict:
         "status": dict(conn.execute("select status, count(*) from candidates group by 1").fetchall()),
         "resims": _rows(conn, """select r.id, r.candidate_id, r.account, r.expr, r.alpha_id, r.sharpe, r.fitness,
                                         r.turnover, r.pp_corr, r.status, r.error, r.checks, r.created_at,
-                                        r.lane, r.purpose, c.sharpe as old_sharpe, c.datasets
+                                        r.lane, r.purpose, r.settings, c.sharpe as old_sharpe, c.datasets
                                  from resims r join candidates c on c.id = r.candidate_id order by r.id desc limit 200"""),
         "described": _rows(conn, """select d.candidate_id, d.text, c.expr, c.sharpe, c.datasets, c.n_ops
                                     from descriptions d join candidates c on c.id = d.candidate_id
@@ -79,6 +79,10 @@ def snapshot(db_path: str) -> dict:
                                            order by id desc limit 60""")
     except sqlite3.OperationalError:
         out["autosubmit"] = []
+    try:
+        theme = current_theme(conn)
+    except Exception:
+        theme = None
     conn.close()
     out["regular"] = []
     for r in out["resims"]:
@@ -88,8 +92,10 @@ def snapshot(db_path: str) -> dict:
             if r["reg_verdict"] in ("reg_ok", "near", "pending"):
                 out["regular"].append({k: r[k] for k in ("alpha_id", "candidate_id", "account", "expr", "sharpe", "fitness",
                                                          "turnover", "lane", "purpose", "reg_verdict", "reg_fails", "datasets")})
-            r["themes"] = matched_pp_themes(r["checks"])
+            st = json.loads(r.get("settings") or "{}")
+            r["themes"] = theme_names(r["checks"], theme, st.get("region"), st.get("delay"))   # the rule: no description yet
         r.pop("checks", None)
+        r.pop("settings", None)
     out["version"] = SERVER_VERSION
     return out
 

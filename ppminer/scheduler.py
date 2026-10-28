@@ -22,8 +22,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import os
-
 from . import autosubmit, lanes, marketx
 from . import theme as th
 from .catalog import Catalog
@@ -74,7 +72,6 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
     t_end = time.time() + hours * 3600
     n += marketx.clear_unfinished(marketx.connect())
     log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
-    themes_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "themes.json")
     last_theme = None
     submitter: threading.Thread | None = None
     while time.time() < t_end:
@@ -82,7 +79,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
         accounts = [a for a, c in cfg.get("accounts", {}).items() if c.get("enabled")]
         regions = cfg.get("regions", ["USA"])
         try:
-            theme = th.detect(conn, th.load_themes(themes_path) if os.path.exists(themes_path) else [])
+            theme = th.current(conn)
         except Exception as e:
             theme = None
             log(f"theme detection: {e}")

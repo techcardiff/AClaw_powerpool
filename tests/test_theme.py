@@ -78,3 +78,38 @@ def test_revise_ranks_theme_rows_by_amer_sharpe():
         c.execute("insert into resims(candidate_id, account, status, sharpe, checks) values (?, 'A', 'done', ?, ?)", (cid, sharpe, checks))
     assert [r["id"] for r in revise.todo(c, "A", t)] == [3, 2, 1]   # AMER 0.2 is too far; USA templates stay out
     assert [r["id"] for r in revise.todo(c, "A")] == [1]
+
+
+GLB_RULE = "region=GLB & delay=1 & AMER Sharpe > 1"
+NOV_NAME = NOV["name"]
+
+
+def _checks(amer, themes_pass=False):
+    out = [{"name": "LOW_GLB_AMER_SHARPE", "result": "PASS" if amer > 1 else "FAIL", "limit": 1, "value": amer}]
+    if themes_pass:      # what BRAIN reports once the alpha has a description (3qorW3L6, 28 Oct)
+        out += [{"name": "MATCHES_THEMES", "result": "WARNING", "themes": [{"name": "DEU/D1 GBR/D1 Theme"}]},
+                {"name": "MATCHES_THEMES", "result": "PASS", "themes": [{"name": NOV_NAME}, {"name": "GLB/D1/MODEL Pyramid Theme"}]}]
+    else:
+        out += [{"name": "MATCHES_THEMES", "result": "WARNING", "themes": [{"name": NOV_NAME}]}]
+    return json.dumps(out)
+
+
+def test_matched_themes_finds_pass_among_two_checks():
+    assert th.matched_pp_themes(_checks(1.12, themes_pass=True)) == [NOV_NAME]
+    assert th.matched_pp_themes(_checks(1.12)) == []
+
+
+def test_rule_match_before_description():
+    t = th.parse_theme(NOV_NAME, "2026-10-26", "2026-11-29", GLB_RULE)
+    assert th.rule_match(t, _checks(1.12), "GLB", 1)
+    assert not th.rule_match(t, _checks(0.91), "GLB", 1)
+    assert not th.rule_match(t, _checks(1.12), "USA", 1)
+    assert not th.rule_match(t, _checks(1.12), "GLB", 0)
+    assert th.theme_names(_checks(1.12), t, "GLB", 1) == [NOV_NAME]
+    assert th.theme_names(_checks(1.12, themes_pass=True), t, "GLB", 1) == [NOV_NAME]
+
+
+def test_verdict_uses_callers_theme_decision():
+    chk = json.loads(_checks(1.12)) + [{"name": "POWER_POOL_CORRELATION", "result": "PASS", "value": 0.2}]
+    assert "no Power Pool theme" in verdict(1.3, json.dumps(chk), require_theme=True)[1]
+    assert verdict(1.3, json.dumps(chk), require_theme=True, theme_ok=True)[0] == "pp_ok"

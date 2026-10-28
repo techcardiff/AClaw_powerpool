@@ -6,10 +6,13 @@ import json
 from .theme import matched_pp_themes
 
 
-def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool = False) -> tuple[str, list[str]]:
+def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool = False,
+            theme_ok: bool | None = None) -> tuple[str, list[str]]:
     """Returns (status, reasons): status is pp_ok | risky | pending | not_pp.
     require_theme: pure Power Pool alphas only need a theme match after week 6 of the
-    account's first Power Pool submission (and for the thematic leaderboard)."""
+    account's first Power Pool submission (and for the thematic leaderboard).
+    theme_ok: the caller's theme decision (theme.theme_names); default BRAIN's
+    MATCHES_THEMES, which only matches once the alpha has a description."""
     checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
     res = lambda n: (checks.get(n) or {}).get("result")
     reasons = []
@@ -23,7 +26,7 @@ def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool =
         # WARNING = above 0.5 with an alpha already in the Power Pool; only eligible with
         # sharpe >= 10% above that alpha, which BRAIN decides at submission
         reasons.append(f"PP correlation {ppc.get('value', '?')} > {ppc.get('limit', 0.5)}")
-    if require_theme and not matched_pp_themes(list(checks.values())):
+    if require_theme and not (theme_ok if theme_ok is not None else matched_pp_themes(list(checks.values()))):
         reasons.append("no Power Pool theme")
     if not ppc and res("CONCENTRATED_WEIGHT") == "FAIL":
         # BRAIN never computes the correlation checks for these, they stay PENDING forever

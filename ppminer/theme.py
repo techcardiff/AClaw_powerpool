@@ -4,12 +4,17 @@ Example theme string (Oct 2026):
     delay=1 & datacategory in ['analyst', 'model', 'news'] & single datacategory
 
 BRAIN's MATCHES_THEMES check names the themes an alpha could count toward: with
-result PASS they are the themes it matches, with WARNING the ones it does not.
+result PASS they are the themes it matches, with WARNING the ones it does not. It only
+reports a Power Pool theme as matched once the alpha has a description (28 Oct: HT52122's
+3qorW3L6, AMER Sharpe 1.12, moved from WARNING to PASS when one was set), and simulation
+results never have one. So before submission an alpha is judged by the theme's own rule
+(rule_match); auto-submit sets the description first and then BRAIN's check confirms it.
 """
 from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -92,10 +97,33 @@ def matched_pp_themes(checks) -> list[str]:
     (a list of check dicts, or its JSON). WARNING lists the themes it does NOT match."""
     if isinstance(checks, str) or checks is None:
         checks = json.loads(checks or "[]") or []
-    mt = next((c for c in checks if c.get("name") == "MATCHES_THEMES"), {})
-    if mt.get("result") != "PASS":
-        return []
-    return [t["name"] for t in mt.get("themes", []) if "power pool" in t["name"].lower()]
+    # with a match BRAIN lists two MATCHES_THEMES checks: PASS (matched) and WARNING (the rest)
+    return [t["name"] for c in checks if c.get("name") == "MATCHES_THEMES" and c.get("result") == "PASS"
+            for t in c.get("themes", []) if "power pool" in t["name"].lower()]
+
+
+def rule_match(theme: Theme | None, checks, region: str | None, delay: int | None,
+               categories: set[str] | None = None) -> bool:
+    """The theme's own rule on a result: region, delay, data categories (when known) and
+    sub-region Sharpes ('AMER Sharpe > 1': BRAIN's LOW_GLB_AMER_SHARPE value)."""
+    if theme is None or (theme.delay is not None and delay is not None and delay != theme.delay):
+        return False
+    if theme.regions and region not in theme.regions:
+        return False
+    if categories is not None and not theme.matches(delay=theme.delay or 1, region=region, categories=categories):
+        return False
+    have = sub_sharpes(checks)
+    return all((have.get(part) or 0) > need for part, need in theme.sub_sharpe.items())
+
+
+def theme_names(checks, theme: Theme | None, region: str | None, delay: int | None,
+                categories: set[str] | None = None) -> list[str]:
+    """Power Pool themes a result matches: BRAIN's word when it has one (described alphas),
+    otherwise the active theme's rule."""
+    names = matched_pp_themes(checks)
+    if theme is not None and theme.name not in names and rule_match(theme, checks, region, delay, categories):
+        names.append(theme.name)
+    return names
 
 
 def from_name(name: str, day: dt.date | None = None) -> Theme:
@@ -129,3 +157,11 @@ def detect(conn, themes: list[Theme] = (), recent: int = 300) -> Theme | None:
             return t
     act = active_themes(list(themes))
     return act[0] if act else None
+
+
+THEMES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "themes.json")
+
+
+def current(conn) -> Theme | None:
+    """detect() with themes.json, as the scheduler steers by it."""
+    return detect(conn, load_themes(THEMES_PATH) if os.path.exists(THEMES_PATH) else [])
