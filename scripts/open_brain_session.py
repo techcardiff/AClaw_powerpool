@@ -117,6 +117,62 @@ def cdp(ws, msg_id: int, method: str, params: dict) -> dict:
             return reply.get("result", {})
 
 
+def wait_for_windows_closed(chrome: subprocess.Popen, port: int) -> None:
+    """Return once Chrome exits or has no open page left. On macOS closing the last
+    window does not quit Chrome, so the DevTools page list is the reliable signal."""
+    while chrome.poll() is None:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3) as r:
+                pages = [t for t in json.loads(r.read()) if t.get("type") == "page"]
+        except Exception:
+            pages = None                     # DevTools gone: Chrome is shutting down
+        if not pages:
+            return
+        time.sleep(2)
+
+
+def profile_pids(profile: str) -> list[int]:
+    """PIDs of any Chrome process (helpers included) using this profile directory."""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                  f"Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{profile}*' }} "
+                                  "| ForEach-Object { $_.ProcessId }"], capture_output=True, text=True, timeout=30).stdout
+        else:
+            out = subprocess.run(["pgrep", "-f", profile], capture_output=True, text=True, timeout=30).stdout
+        return [int(p) for p in out.split() if p.strip().isdigit() and int(p) != os.getpid()]
+    except Exception:
+        return []
+
+
+def stop_profile_processes(chrome: subprocess.Popen, profile: str) -> None:
+    if chrome.poll() is None:
+        chrome.terminate()
+        try:
+            chrome.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            chrome.kill()
+    for _ in range(20):                      # helpers, or a background relaunch, can outlive the main process
+        pids = profile_pids(profile)
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, 15)
+            except OSError:
+                pass
+        time.sleep(0.5)
+
+
+def remove_dir(path: str) -> bool:
+    for _ in range(10):
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            return True
+        time.sleep(1)
+    return False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="qa-3080", help="SSH host holding the session (default qa-3080)")
@@ -138,9 +194,12 @@ def main() -> None:
 
     profile = tempfile.mkdtemp(prefix="brain-session-")
     port = free_port()
+    # --disable-background-mode: otherwise macOS can relaunch this Chrome in the background
+    # after its window closes, keeping the profile (and the session) alive.
     chrome = subprocess.Popen([find_chrome(), f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
                                "--remote-allow-origins=*", "--no-first-run", "--no-default-browser-check",
-                               "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                               "--disable-background-mode", "about:blank"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         ws = websocket.create_connection(devtools_ws(port), timeout=20)
         cdp(ws, 1, "Storage.setCookies", {"cookies": [{
@@ -151,16 +210,17 @@ def main() -> None:
         ws.close()
         del token
         print("opened BRAIN in a temporary Chrome profile; close that Chrome window when done")
-        chrome.wait()
+        wait_for_windows_closed(chrome, port)
     except KeyboardInterrupt:
-        chrome.terminate()
+        pass
     finally:
+        stop_profile_processes(chrome, profile)
         if args.keep_profile:
             print(f"temporary profile kept at {profile}")
-        else:
-            time.sleep(1)
-            shutil.rmtree(profile, ignore_errors=True)
+        elif remove_dir(profile):
             print("temporary profile deleted")
+        else:
+            print(f"WARNING: could not delete the temporary profile; remove it by hand: {profile}")
 
 
 if __name__ == "__main__":
