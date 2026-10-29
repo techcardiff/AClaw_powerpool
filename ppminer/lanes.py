@@ -177,6 +177,10 @@ def saturated_datasets(conn: sqlite3.Connection, account: str, min_fails: int = 
 # With an active Power Pool theme, this share of Lane A goes to candidates that match it
 # (any source); the source groups below fill the rest and any theme slots left empty.
 THEME_SHARE = 0.5
+# Template alphas (theme.theme_ideas, S1 shapes) at most this many per batch: 838 GLB ones
+# from 26-29 Oct reached Sharpe 1 in 14 cases (1.7%) and never the quality bar, while
+# taking 28% of all simulations. Freed slots go to Qwen ideas and harvested alphas.
+MAX_TEMPLATES = 3
 
 
 def theme_datasets(conn: sqlite3.Connection, theme, accounts: list[str]) -> set[str]:
@@ -197,15 +201,18 @@ def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (
                   exclude_datasets=saturated_datasets(conn, account), max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
     pools = [_without(shortlist(conn, None, n=n * 3, statuses=st, **common), o_ids, n) for st, _ in LANE_A_GROUPS]
     picked, seen = [], set()
+    templates = [0]
 
     def take(rows, k):
         for r in rows:
             if k <= 0 or len(picked) >= n:
                 return
-            if r["id"] not in seen:
-                seen.add(r["id"])
-                picked.append(r)
-                k -= 1
+            if r["id"] in seen or (r["status"] == "template" and templates[0] >= MAX_TEMPLATES):
+                continue
+            seen.add(r["id"])
+            picked.append(r)
+            templates[0] += r["status"] == "template"
+            k -= 1
 
     if theme is not None:
         # both accounts chase the same theme in one correlation pool: a theme dataset

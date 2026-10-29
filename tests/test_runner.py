@@ -57,3 +57,18 @@ def test_alpha_errors_and_manual_jobs():
                                      "simulation failed: ERROR Invalid number of inputs : 1, should be exactly 2")
     assert runner.requeue_failed(c, c.execute("select * from resims where id=2").fetchone(), "simulation failed: CANCELLED ")
     assert c.execute("select status from resims where id=2").fetchone()[0] == "queued"
+
+
+def test_lane_a_caps_template_alphas(monkeypatch):
+    from ppminer import lanes
+    rows = [{"id": i, "status": "template", "datasets": f'["d{i}"]'} for i in range(10)] + \
+           [{"id": 100 + i, "status": "pp_multi", "datasets": f'["m{i}"]'} for i in range(10)]
+    monkeypatch.setattr(lanes, "collide_stems", lambda c, a: (set(), set()))
+    monkeypatch.setattr(lanes, "other_accounts", lambda c, a, o: (set(), set(), set()))
+    monkeypatch.setattr(lanes, "submitted_exprs", lambda c, a: set())
+    monkeypatch.setattr(lanes, "saturated_datasets", lambda c, a: set())
+    monkeypatch.setattr(lanes, "theme_datasets", lambda c, t, a: set())
+    monkeypatch.setattr(lanes, "shortlist", lambda c, t, n, statuses, **kw: [r for r in rows if r["status"] in statuses
+                                                                            or t is not None])
+    picked = lanes.lane_a(None, "A1", 10, theme=object())
+    assert sum(r["status"] == "template" for r in picked) == lanes.MAX_TEMPLATES and len(picked) == 10

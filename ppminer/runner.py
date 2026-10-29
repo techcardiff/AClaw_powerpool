@@ -127,11 +127,13 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     # slots Lane C couldn't fill go back to Lane A
     if room > 0:
         taken = {r["id"] for r in rows_a}
+        templates = sum(r["status"] == "template" for r in rows_a)     # one template cap per batch
         for r in lanes.lane_a(conn, account, len(rows_a) + room, others, theme):
             if room <= 0:
                 break
-            if r["id"] in taken:
+            if r["id"] in taken or (r["status"] == "template" and templates >= lanes.MAX_TEMPLATES):
                 continue
+            templates += r["status"] == "template"
             purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
             ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
             room -= 1
