@@ -106,13 +106,14 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     if size <= 0:
         return ids
     n_c = max(1, round(size * c_share))
-    rows_a = lanes.lane_a(conn, account, size - n_c, others, theme)
+    budget = lanes.Budget(conn)                 # template / used-up-field caps for the whole batch
+    rows_a = lanes.lane_a(conn, account, size - n_c, others, theme, budget)
     for r in rows_a:
         purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
     room = size - len([r for r in rows_a])
     # Lane C part 1: the tiered funnel fixes the failing check of the best near miss
-    for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room)):
+    for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room), budget):
         ids.append(_enqueue(conn, account, "C", purpose, cid, expr, st, parent))
         room -= 1
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
@@ -120,20 +121,17 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch), others):
         if room <= 0:
             break
-        if r["id"] in in_batch:
+        if r["id"] in in_batch or budget.room(r) <= 0:
             continue
+        budget.take(r)
         ids.append(_enqueue(conn, account, "C", "harvest-regular", r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
         room -= 1
     # slots Lane C couldn't fill go back to Lane A
     if room > 0:
-        taken = {r["id"] for r in rows_a}
-        templates = sum(r["status"] == "template" for r in rows_a)     # one template cap per batch
-        for r in lanes.lane_a(conn, account, len(rows_a) + room, others, theme):
+        taken = {r["id"] for r in rows_a} | in_batch
+        for r in lanes.lane_a(conn, account, room, others, theme, budget, skip_ids=taken):
             if room <= 0:
                 break
-            if r["id"] in taken or (r["status"] == "template" and templates >= lanes.MAX_TEMPLATES):
-                continue
-            templates += r["status"] == "template"
             purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
             ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
             room -= 1

@@ -16,6 +16,7 @@ import json
 import re
 import sqlite3
 
+from . import hints
 from .brain import BASE, Brain
 from .expr import GROUPING_FIELDS, analyze
 from .harvest import SUSPICIOUS_SHARPE
@@ -181,6 +182,33 @@ THEME_SHARE = 0.5
 # from 26-29 Oct reached Sharpe 1 in 14 cases (1.7%) and never the quality bar, while
 # taking 28% of all simulations. Freed slots go to Qwen ideas and harvested alphas.
 MAX_TEMPLATES = 3
+# Alphas using a field family that is used up in the team's submitted alphas (hints.overused:
+# 10+ Power Pool correlation results with under 25% passing, or 20+ uses and none yet).
+# 26-29 Oct: 93 of 144 strong results that failed Power Pool correlation used one, but so
+# did 3 of the 7 that passed (YO50689's submitted QPvMO8qw among them), so they are capped
+# per batch, strongest first, rather than blocked.
+MAX_USED_UP = 3
+
+
+class Budget:
+    """Per-batch caps shared by Lane A, Lane C and the funnel."""
+
+    def __init__(self, conn, templates: int = MAX_TEMPLATES, used_up: int = MAX_USED_UP):
+        self.left = {"template": templates, "used_up": used_up}
+        self.hidden = hints.overused(conn) if conn is not None else []
+
+    def kinds(self, row) -> list[str]:
+        out = ["template"] if row["status"] == "template" else []
+        if any(hints.is_overused(f, self.hidden) for f in json.loads(row["fields"] or "[]")):
+            out.append("used_up")
+        return out
+
+    def room(self, row) -> int:
+        return min([self.left[k] for k in self.kinds(row)], default=10**9)
+
+    def take(self, row, n: int = 1) -> None:
+        for k in self.kinds(row):
+            self.left[k] -= n
 
 
 def theme_datasets(conn: sqlite3.Connection, theme, accounts: list[str]) -> set[str]:
@@ -193,25 +221,27 @@ def theme_datasets(conn: sqlite3.Connection, theme, accounts: list[str]) -> set[
         (*accounts, *sorted(theme.regions)))}
 
 
-def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (), theme=None) -> list[sqlite3.Row]:
+def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (), theme=None,
+           budget: Budget | None = None, skip_ids: set[int] = frozenset()) -> list[sqlite3.Row]:
+    budget = budget or Budget(conn)
     pp, _ = collide_stems(conn, account)
     o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
     common = dict(account=account, skip_done=True, exclude_stems=pp | o_stems,
                   exclude_exprs=submitted_exprs(conn, account) | o_exprs,   # exact copies: tag, don't re-simulate
-                  exclude_datasets=saturated_datasets(conn, account), max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE)
+                  exclude_datasets=saturated_datasets(conn, account), max_per_dataset=3, max_sharpe=SUSPICIOUS_SHARPE,
+                  skip_ids=set(skip_ids))
     pools = [_without(shortlist(conn, None, n=n * 3, statuses=st, **common), o_ids, n) for st, _ in LANE_A_GROUPS]
     picked, seen = [], set()
-    templates = [0]
 
     def take(rows, k):
         for r in rows:
             if k <= 0 or len(picked) >= n:
                 return
-            if r["id"] in seen or (r["status"] == "template" and templates[0] >= MAX_TEMPLATES):
+            if r["id"] in seen or budget.room(r) <= 0:
                 continue
             seen.add(r["id"])
             picked.append(r)
-            templates[0] += r["status"] == "template"
+            budget.take(r)
             k -= 1
 
     if theme is not None:

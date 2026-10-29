@@ -61,8 +61,8 @@ def test_alpha_errors_and_manual_jobs():
 
 def test_lane_a_caps_template_alphas(monkeypatch):
     from ppminer import lanes
-    rows = [{"id": i, "status": "template", "datasets": f'["d{i}"]'} for i in range(10)] + \
-           [{"id": 100 + i, "status": "pp_multi", "datasets": f'["m{i}"]'} for i in range(10)]
+    rows = [{"id": i, "status": "template", "datasets": f'["d{i}"]', "fields": '["t"]'} for i in range(10)] + \
+           [{"id": 100 + i, "status": "pp_multi", "datasets": f'["m{i}"]', "fields": '["m"]'} for i in range(10)]
     monkeypatch.setattr(lanes, "collide_stems", lambda c, a: (set(), set()))
     monkeypatch.setattr(lanes, "other_accounts", lambda c, a, o: (set(), set(), set()))
     monkeypatch.setattr(lanes, "submitted_exprs", lambda c, a: set())
@@ -72,3 +72,17 @@ def test_lane_a_caps_template_alphas(monkeypatch):
                                                                             or t is not None])
     picked = lanes.lane_a(None, "A1", 10, theme=object())
     assert sum(r["status"] == "template" for r in picked) == lanes.MAX_TEMPLATES and len(picked) == 10
+
+
+def test_budget_caps_used_up_fields_across_lanes():
+    from ppminer import lanes
+    b = lanes.Budget(None)
+    b.hidden = [("vwap", 30, 12, 1), ("anl4_adjusted_netincome*", 25, 15, 2)]
+    used = {"status": "pp_multi", "fields": '["anl4_adjusted_netincome_ft", "cap"]'}
+    fresh = {"status": "pp_multi", "fields": '["fnd6_newa1v1300_ceq"]'}
+    assert b.room(fresh) > 100 and b.room(used) == lanes.MAX_USED_UP
+    b.take(used, 2)                          # e.g. two funnel fixes of one parent
+    b.take(used)
+    assert b.room(used) == 0 and b.room(fresh) > 100
+    tpl = {"status": "template", "fields": '["vwap"]'}
+    assert b.kinds(tpl) == ["template", "used_up"] and b.room(tpl) == 0

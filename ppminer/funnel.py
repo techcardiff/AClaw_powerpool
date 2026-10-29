@@ -69,7 +69,7 @@ def fixes(expr: str, settings: dict, fails: list[str], checks: dict) -> list[tup
 
 def parents(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
     """Finished results worth fixing: regular near misses, best Sharpe first."""
-    rows = conn.execute("""select r.*, c.region as cregion, c.id as cid from resims r join candidates c
+    rows = conn.execute("""select r.*, c.region as cregion, c.id as cid, c.fields from resims r join candidates c
                            on c.id = r.candidate_id where r.account=? and r.status='done' and r.sharpe >= 1.2
                            order by r.sharpe desc limit 400""", (account,)).fetchall()
     return [r for r in rows if regular_verdict(r["checks"])[0] == "near" and _depth(conn, r["id"]) < MAX_DEPTH]
@@ -97,11 +97,15 @@ def _candidate_for(conn: sqlite3.Connection, parent: sqlite3.Row, expr: str, why
     return conn.execute("select id from candidates where key=?", (key,)).fetchone()[0]
 
 
-def next_jobs(conn: sqlite3.Connection, account: str, room: int) -> list[tuple[int, str, str, dict, int]]:
+def next_jobs(conn: sqlite3.Connection, account: str, room: int, budget=None) -> list[tuple[int, str, str, dict, int]]:
     """Up to `room` (candidate_id, purpose, expr, settings, parent_resim_id) jobs from the best parent
-    that still has untried fixes."""
+    that still has untried fixes. `budget` (lanes.Budget) caps parents on used-up fields."""
     seen = tried(conn, account)
+    total = room
     for p in parents(conn, account):
+        room = min(total, budget.room(p)) if budget is not None else total
+        if room <= 0:
+            continue
         checks = {c.get("name"): c for c in json.loads(p["checks"] or "[]") or []}
         _, fails = regular_verdict(p["checks"])
         settings = json.loads(p["settings"])
@@ -113,6 +117,8 @@ def next_jobs(conn: sqlite3.Connection, account: str, room: int) -> list[tuple[i
             if len(jobs) >= room:
                 break
         if jobs:
+            if budget is not None:
+                budget.take(p, len(jobs))
             conn.commit()
             return jobs
     return []
