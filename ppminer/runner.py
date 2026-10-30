@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import cookies as ck
-from . import lanes, marketx, revise, templates
+from . import lanes, marketx, revise, templates, transfer
 from .brain import AuthRequired, Brain, settings_for, summarize
 from .catalog import Catalog
 from .fields import block
@@ -97,6 +97,9 @@ def _enqueue(conn, account, lane, purpose, cand_id, expr, settings, parent=None)
                         (cand_id, account, expr, json.dumps(settings), lane, purpose, parent)).lastrowid
 
 
+PURPOSE = {"explore": "explore", "rewrite": "rewrite", "template": "template", "transfer": "transfer"}
+
+
 def build_batch(conn, account: str, size: int, c_share: float, others: list[str] = (), theme=None) -> list[int]:
     from . import funnel
     # manual jobs from the Search page run first, in the order they were queued
@@ -109,7 +112,7 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     budget = lanes.Budget(conn)                 # template / used-up-field caps for the whole batch
     rows_a = lanes.lane_a(conn, account, size - n_c, others, theme, budget)
     for r in rows_a:
-        purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
+        purpose = PURPOSE.get(r["status"], "harvest")
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
     room = size - len([r for r in rows_a])
     # Lane C part 1: the tiered funnel fixes the failing check of the best near miss
@@ -132,7 +135,7 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
         for r in lanes.lane_a(conn, account, room, others, theme, budget, skip_ids=taken):
             if room <= 0:
                 break
-            purpose = {"explore": "explore", "rewrite": "rewrite", "template": "template"}.get(r["status"], "harvest")
+            purpose = PURPOSE.get(r["status"], "harvest")
             ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
             room -= 1
     conn.commit()
@@ -302,7 +305,8 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
             # BRAIN often never fills POWER_POOL_CORRELATION in /check; for alphas strong enough
             # to submit, estimate it from correlations/self (limited per cycle: one call each)
             if (ppcorr.needs_fallback(checks) and fallbacks < 12
-                    and not quality_gate(r["sharpe"], r["fitness"], r["turnover"], json.dumps(checks))):
+                    and not quality_gate(r["sharpe"], r["fitness"], r["turnover"], json.dumps(checks),
+                                         universe=json.loads(r["settings"] or "{}").get("universe"))):
                 fallbacks += 1
                 try:
                     checks = ppcorr.fill(brain, conn, r["alpha_id"], checks, account)
@@ -384,6 +388,13 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     n = explore_regions(conn, catalog, account, list(regions), theme=theme)
     if n:
         log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
+    try:
+        n = transfer.ideas(conn, catalog, account)
+    except Exception as e:
+        n = 0
+        log(f"[{account}] market transfer: {e}")
+    if n:
+        log(f"[{account}] {n} strong USA ideas copied to other markets")
     if theme is not None and theme.regions:
         n = theme_ideas(conn, catalog, account, theme, others)
         if n:

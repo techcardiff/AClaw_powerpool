@@ -126,7 +126,7 @@ def submitted_exprs(conn: sqlite3.Connection, account: str) -> set[str]:
 
 
 # ── Lane A ──────────────────────────────────────────────────────────────────
-LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore", "template")
+LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore", "template", "transfer")
 
 
 def other_accounts(conn: sqlite3.Connection, account: str, others: list[str]) -> tuple[set[int], set[str], set[str]]:
@@ -156,7 +156,7 @@ def _without(rows, ids: set[int], n: int) -> list[sqlite3.Row]:
 LANE_A_GROUPS = (
     (("pp_multi",), 0.6),
     (("pp_ready",), 0.2),
-    (("rewrite", "explore", "template"), 0.2),
+    (("rewrite", "explore", "template", "transfer"), 0.2),   # transfer: USA ideas in other markets
 )
 
 

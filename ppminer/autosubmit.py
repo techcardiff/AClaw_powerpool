@@ -112,7 +112,9 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         if submitted >= q0.remaining:
             break
         aid, cid = p["alpha_id"], p["candidate_id"]
-        low = quality_gate(p["sharpe"], p["fitness"], p["turnover"], p["checks"], quality, returns=p["returns"])
+        universe = json.loads(p["settings"] or "{}").get("universe")
+        low = quality_gate(p["sharpe"], p["fitness"], p["turnover"], p["checks"], quality, returns=p["returns"],
+                           universe=universe)
         if low:
             # the Power Pool rule is only sharpe 1.0; income follows quality, so weak alphas wait
             _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
@@ -147,7 +149,8 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         if v != "pp_ok" or ppc != "PASS":
             _log(conn, account, q.today, "skip", aid, cid, f"fresh check: {v} {why} PPC={ppc}")
             continue
-        low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality, returns=s.get("returns"))
+        low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality, returns=s.get("returns"),
+                           universe=universe)
         if low:
             _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
             continue

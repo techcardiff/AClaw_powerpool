@@ -24,7 +24,7 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
     With an account, only alphas whose fields that account can use are picked."""
     from .fields import available
     q = f"""select * from candidates where status in ({','.join('?' * len(statuses))})
-            and (family_rank = 1 or status in ('rewrite', 'explore', 'template'))
+            and (family_rank = 1 or status in ('rewrite', 'explore', 'template', 'transfer'))
             order by case when sharpe is null then 0 else single_dataset end desc, abs(coalesce(sharpe, 0)) desc,
                      case when sharpe is null then -id else id end"""
     done = set()

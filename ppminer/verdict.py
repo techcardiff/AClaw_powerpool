@@ -120,10 +120,17 @@ QUALITY_DEFAULTS = {
 }
 
 
+# Smaller universes earn lower Sharpe for the same idea: our TOP1000 versions of TOP3000
+# alphas kept about half the Sharpe (116 funnel runs to 30 Oct, best 1.5). BRAIN's Power
+# Pool minimum is Sharpe 1.0; these bars apply on top of the account's quality bar.
+UNIVERSE_BARS = {"TOP1000": {"min_sharpe": 1.2, "min_fitness": 0.9}}
+
+
 def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict | None = None,
-                 returns: float | None = None) -> list[str]:
-    """Reasons an alpha falls below the auto-submit quality bar ([] = passes)."""
-    b = dict(QUALITY_DEFAULTS, **(bar or {}))
+                 returns: float | None = None, universe: str | None = None) -> list[str]:
+    """Reasons an alpha falls below the auto-submit quality bar ([] = passes).
+    `universe`: the simulation's universe, for UNIVERSE_BARS."""
+    b = {**QUALITY_DEFAULTS, **(bar or {}), **UNIVERSE_BARS.get(universe or "", {})}
     checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
     val = lambda n: (checks.get(n) or {}).get("value")
     out = []

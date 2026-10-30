@@ -86,3 +86,35 @@ def test_budget_caps_used_up_fields_across_lanes():
     assert b.room(used) == 0 and b.room(fresh) > 100
     tpl = {"status": "template", "fields": '["vwap"]'}
     assert b.kinds(tpl) == ["template", "used_up"] and b.room(tpl) == 0
+
+
+def test_top1000_bar_is_lower():
+    from ppminer.verdict import quality_gate
+    assert quality_gate(1.25, 1.03, 0.08, "[]") == ["sharpe 1.25 < 1.5"]
+    assert quality_gate(1.25, 1.03, 0.08, "[]", universe="TOP1000") == []
+    assert quality_gate(1.2, 0.85, 0.08, "[]", universe="TOP1000") == ["fitness 0.85 < 0.9"]
+    assert quality_gate(1.25, 1.03, 0.08, "[]", {"min_sharpe": 1.6}, universe="TOP1000") == []
+
+
+def test_transfer_copies_strong_usa_result_where_fields_exist():
+    from ppminer import db, transfer
+    from ppminer.catalog import Catalog
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript(db.SCHEMA)
+    from ppminer import lanes
+    lanes.migrate(c)
+    c.execute("create table if not exists account_fields (account text, region text, field text, dataset text, category text, type text, description text, alpha_count int, delay int)")
+    for region, f in (("USA", "x_a"), ("GLB", "x_a"), ("EUR", "y_b")):
+        c.execute("insert into account_fields(account, region, field, dataset, category, type) values ('A1',?,?,'d1','model','MATRIX')", (region, f))
+    c.execute("""insert into candidates(id, key, expr, region, delay, fields, status) values (1,'USA|1|rank(x_a)','rank(x_a)','USA',1,'["x_a"]','pp_multi')""")
+    good = json.dumps([{"name": "POWER_POOL_CORRELATION", "result": "PASS"}])
+    c.execute("""insert into resims(candidate_id, account, expr, settings, alpha_id, sharpe, fitness, turnover, returns, checks, status)
+                 values (1,'A1','rank(x_a)',?, 'AL1', 1.9, 1.3, 0.1, 0.1, ?, 'done')""",
+              (json.dumps({"region": "USA", "universe": "TOP3000", "delay": 1, "decay": 4, "truncation": 0.08}), good))
+    cat = Catalog("/nonexistent")
+    cat.add_account_fields(c, "A1")
+    assert transfer.ideas(c, cat, "A1") == 1                       # GLB only: EUR lacks x_a, ASI has nothing
+    row = c.execute("select * from candidates where status='transfer'").fetchone()
+    assert row["region"] == "GLB" and row["decay"] == 4 and "transfer:AL1@A1" in row["sources"]
+    assert transfer.ideas(c, cat, "A1") == 0                       # already copied
