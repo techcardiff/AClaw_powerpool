@@ -118,3 +118,21 @@ def test_transfer_copies_strong_usa_result_where_fields_exist():
     row = c.execute("select * from candidates where status='transfer'").fetchone()
     assert row["region"] == "GLB" and row["decay"] == 4 and "transfer:AL1@A1" in row["sources"]
     assert transfer.ideas(c, cat, "A1") == 0                       # already copied
+
+
+def test_lane_a_runs_market_copies_past_the_collision_filter(monkeypatch):
+    from ppminer import lanes
+    rows = [{"id": 1, "status": "transfer", "datasets": '["d"]', "fields": '["x"]'},
+            {"id": 2, "status": "transfer", "datasets": '["e"]', "fields": '["y"]'},
+            {"id": 3, "status": "transfer", "datasets": '["f"]', "fields": '["z"]'},
+            {"id": 10, "status": "pp_multi", "datasets": '["m"]', "fields": '["m"]'}]
+    monkeypatch.setattr(lanes, "collide_stems", lambda c, a: ({"x"}, set()))     # the copy's USA original is submitted
+    monkeypatch.setattr(lanes, "other_accounts", lambda c, a, o: (set(), {"z"}, set()))
+    monkeypatch.setattr(lanes, "submitted_exprs", lambda c, a: set())
+    monkeypatch.setattr(lanes, "saturated_datasets", lambda c, a: set())
+
+    def fake_shortlist(c, t, n, statuses, exclude_stems=frozenset(), **kw):
+        return [r for r in rows if r["status"] in statuses and r["fields"][2] not in exclude_stems]
+    monkeypatch.setattr(lanes, "shortlist", fake_shortlist)
+    ids = [r["id"] for r in lanes.lane_a(None, "A1", 5)]
+    assert 1 in ids and 2 in ids and 3 not in ids            # other account's family stays out

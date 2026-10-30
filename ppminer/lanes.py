@@ -156,7 +156,7 @@ def _without(rows, ids: set[int], n: int) -> list[sqlite3.Row]:
 LANE_A_GROUPS = (
     (("pp_multi",), 0.6),
     (("pp_ready",), 0.2),
-    (("rewrite", "explore", "template", "transfer"), 0.2),   # transfer: USA ideas in other markets
+    (("rewrite", "explore", "template"), 0.2),
 )
 
 
@@ -188,6 +188,7 @@ MAX_TEMPLATES = 3
 # did 3 of the 7 that passed (YO50689's submitted QPvMO8qw among them), so they are capped
 # per batch, strongest first, rather than blocked.
 MAX_USED_UP = 3
+MAX_TRANSFERS = 2      # market copies of USA alphas per batch (transfer.py)
 
 
 class Budget:
@@ -244,6 +245,13 @@ def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (
             budget.take(r)
             k -= 1
 
+    # Market copies of USA alphas (transfer.py) skip the Power Pool collision filters: their
+    # USA originals are often submitted or in a submitted cluster, and whether BRAIN counts
+    # a copy in another region as correlated is what these runs find out. The other
+    # account's work stays excluded.
+    copies = shortlist(conn, None, n=MAX_TRANSFERS * 3, statuses=("transfer",), account=account, skip_done=True,
+                       exclude_stems=o_stems, exclude_exprs=o_exprs, max_per_dataset=3, skip_ids=set(skip_ids))
+    take(_without(copies, o_ids, MAX_TRANSFERS), MAX_TRANSFERS)
     if theme is not None:
         # both accounts chase the same theme in one correlation pool: a theme dataset
         # the other account already simulates is left to it
