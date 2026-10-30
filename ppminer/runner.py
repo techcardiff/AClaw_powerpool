@@ -115,10 +115,12 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
         purpose = PURPOSE.get(r["status"], "harvest")
         ids.append(_enqueue(conn, account, "A", purpose, r["id"], submit_expr(r["expr"], r["sharpe"]), settings_for(r)))
     room = size - len([r for r in rows_a])
-    # Lane C part 1: the tiered funnel fixes the failing check of the best near miss
-    for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room), budget):
-        ids.append(_enqueue(conn, account, "C", purpose, cid, expr, st, parent))
-        room -= 1
+    # Lane C part 1: the tiered funnel fixes the failing check of the best near miss, and
+    # smooths the best Power Pool result outside USA that sits below the quality bar
+    for pp in (True, False):
+        for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room), budget, power_pool=pp):
+            ids.append(_enqueue(conn, account, "C", purpose, cid, expr, st, parent))
+            room -= 1
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
     in_batch = {r["id"] for r in rows_a}
     for r in lanes.lane_c(conn, account, max(0, room) + len(in_batch), others):

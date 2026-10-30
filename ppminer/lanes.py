@@ -188,7 +188,7 @@ MAX_TEMPLATES = 3
 # did 3 of the 7 that passed (YO50689's submitted QPvMO8qw among them), so they are capped
 # per batch, strongest first, rather than blocked.
 MAX_USED_UP = 3
-MAX_TRANSFERS = 2      # market copies of USA alphas per batch (transfer.py)
+MAX_TRANSFERS = 3      # market copies of USA alphas per batch (transfer.py)
 
 
 class Budget:

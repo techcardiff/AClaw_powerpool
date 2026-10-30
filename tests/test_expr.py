@@ -174,3 +174,15 @@ def test_quality_gate_blocks_degenerate_alpha():
                       {"name": "LOW_SUB_UNIVERSE_SHARPE", "value": 3.77}])
     low = quality_gate(3.88, 14.91, 0.2042, chk, returns=3.0149)
     assert any("concentrated" in x for x in low) and any("fitness" in x for x in low) and any("returns" in x for x in low)
+
+
+def test_pp_fixes_smooth_high_turnover_within_power_pool_shape():
+    from ppminer.funnel import pp_fixes
+    s = {"universe": "TOP3000", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
+    out = pp_fixes("group_rank(ts_rank(x, 60), country)", s, 0.36)
+    assert out[0][1] == "ts_decay_linear(group_rank(ts_rank(x, 60), country), 5)"
+    assert any(st.get("decay") == 10 for _, _, st in out)
+    calm = pp_fixes("rank(x)", s, 0.02)                     # low turnover: smoothing can't help fitness
+    assert calm and all("neutralization" in w for w, _, _ in calm)
+    long = "rank(ts_rank(ts_zscore(ts_mean(ts_delta(ts_std_dev(x, 5), 5), 5), 5), 5))" + " + rank(x)" * 1
+    assert all(e != f"ts_decay_linear({long}, 5)" for _, e, _ in pp_fixes(long, s, 0.3))   # would be 9 ops

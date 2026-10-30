@@ -11,6 +11,12 @@ expression for that check and only uses settings where settings are the cause:
   low sharpe only       other neutralizations
   self-correlation, faded last-2y edge   stop: no change fixes these
 
+Power Pool near misses outside USA (pp_parents): results that pass the Power Pool rules
+but sit below the quality bar on Sharpe or fitness. 30 Oct: 22 GLB results passed at
+Sharpe 1.1-1.4 with fitness 0.4-0.8, mostly at turnover 0.2-0.4, and none was ever
+retried. They get smoothing (ts_decay_linear, decay 10) when turnover is high and
+other neutralizations otherwise, within the Power Pool shape (8 operators).
+
 Each parent gets each fix at most once (tried expression+settings pairs are
 skipped) and fixes can stack up to MAX_DEPTH levels.
 """
@@ -20,10 +26,14 @@ import json
 import sqlite3
 
 from .expr import analyze
-from .verdict import regular_verdict
+from .pp import MAX_OPS
+from .verdict import quality_gate, regular_verdict, verdict
 
 MAX_DEPTH = 2
 LIQUID_ONLY = 0.3            # trade only names above this adv20 rank
+PP_MIN_SHARPE = 1.1          # Power Pool near misses worth smoothing
+PP_SMOOTH_TURNOVER = 0.1     # above this, fitness is lost to trading
+PP_GAPS = ("sharpe ", "fitness ", "turnover ")   # quality-bar gaps a setting or smoothing can close
 
 
 def _depth(conn: sqlite3.Connection, resim_id: int) -> int:
@@ -68,6 +78,38 @@ def fixes(expr: str, settings: dict, fails: list[str], checks: dict) -> list[tup
     return [o for o in out if analyze(o[1]).ok]
 
 
+def pp_fixes(expr: str, settings: dict, turnover: float | None) -> list[tuple[str, str, dict]]:
+    """Fixes for a Power Pool result below the quality bar on Sharpe/fitness, best first."""
+    s = dict(settings)
+    out: list[tuple[str, str, dict]] = []
+    if (turnover or 0) > PP_SMOOTH_TURNOVER:
+        out.append(("pp fitness: ts_decay_linear 5", f"ts_decay_linear({expr}, 5)", s))
+        if (s.get("decay") or 0) < 10:
+            out.append(("pp fitness: decay 10", expr, dict(s, decay=10)))
+    for nn in ("INDUSTRY", "SUBINDUSTRY", "MARKET"):
+        if s.get("neutralization") != nn and len(out) < 3:
+            out.append((f"pp sharpe: neutralization {nn}", expr, dict(s, neutralization=nn)))
+    return [o for o in out if (a := analyze(o[1])).ok and a.n_ops <= MAX_OPS]
+
+
+def pp_parents(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
+    """Non-USA results that pass the Power Pool rules but miss the quality bar only on
+    Sharpe, fitness or turnover; best Sharpe x fitness first."""
+    rows = conn.execute("""select r.*, c.region as cregion, c.id as cid, c.fields from resims r join candidates c
+                           on c.id = r.candidate_id where r.account=? and r.status='done' and c.region<>'USA'
+                             and r.sharpe >= ? order by r.sharpe * r.fitness desc limit 200""",
+                        (account, PP_MIN_SHARPE)).fetchall()
+    out = []
+    for r in rows:
+        if verdict(r["sharpe"], r["checks"])[0] != "pp_ok":
+            continue
+        gaps = quality_gate(r["sharpe"], r["fitness"], r["turnover"], r["checks"], returns=r["returns"],
+                            universe=json.loads(r["settings"] or "{}").get("universe"))
+        if gaps and all(g.startswith(PP_GAPS) and "implausible" not in g for g in gaps) and _depth(conn, r["id"]) < MAX_DEPTH:
+            out.append(r)
+    return out
+
+
 def parents(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
     """Finished results worth fixing: regular near misses, best Sharpe first."""
     rows = conn.execute("""select r.*, c.region as cregion, c.id as cid, c.fields from resims r join candidates c
@@ -98,20 +140,28 @@ def _candidate_for(conn: sqlite3.Connection, parent: sqlite3.Row, expr: str, why
     return conn.execute("select id from candidates where key=?", (key,)).fetchone()[0]
 
 
-def next_jobs(conn: sqlite3.Connection, account: str, room: int, budget=None) -> list[tuple[int, str, str, dict, int]]:
+def _regular_fixes(p) -> list[tuple[str, str, dict]]:
+    checks = {c.get("name"): c for c in json.loads(p["checks"] or "[]") or []}
+    return fixes(p["expr"], json.loads(p["settings"]), regular_verdict(p["checks"])[1], checks)
+
+
+def _pp_fixes(p) -> list[tuple[str, str, dict]]:
+    return pp_fixes(p["expr"], json.loads(p["settings"]), p["turnover"])
+
+
+def next_jobs(conn: sqlite3.Connection, account: str, room: int, budget=None,
+              power_pool: bool = False) -> list[tuple[int, str, str, dict, int]]:
     """Up to `room` (candidate_id, purpose, expr, settings, parent_resim_id) jobs from the best parent
-    that still has untried fixes. `budget` (lanes.Budget) caps parents on used-up fields."""
+    that still has untried fixes. `budget` (lanes.Budget) caps parents on used-up fields.
+    power_pool: fix Power Pool near misses outside USA (pp_parents) instead of regular ones."""
     seen = tried(conn, account)
     total = room
-    for p in parents(conn, account):
+    for p in (pp_parents if power_pool else parents)(conn, account):
         room = min(total, budget.room(p)) if budget is not None else total
         if room <= 0:
             continue
-        checks = {c.get("name"): c for c in json.loads(p["checks"] or "[]") or []}
-        _, fails = regular_verdict(p["checks"])
-        settings = json.loads(p["settings"])
         jobs = []
-        for why, expr, st in fixes(p["expr"], settings, fails, checks):
+        for why, expr, st in (_pp_fixes if power_pool else _regular_fixes)(p):
             if (expr.replace(" ", ""), json.dumps(st)) in seen:
                 continue
             jobs.append((_candidate_for(conn, p, expr, why), f"funnel: {why}", expr, st, p["id"]))

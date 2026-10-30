@@ -13,7 +13,9 @@ Copies are candidates with status 'transfer' (Lane A); the account's own results
 the other account's lanes leave them alone (lanes.other_accounts: same field family).
 30 Oct: of 105 (HT52122) and 184 (YO50689) qualifying results only 9 copy as they are,
 all to EUR/ASI: most use fields those regions don't have (implied_volatility_*, some
-anl4 estimates) or exceed the Power Pool limits (3 fields, 8 operators).
+anl4 estimates) or exceed the Power Pool limits (3 fields, 8 operators). The first EUR
+copies of Sharpe-2.5 parents kept Sharpe 1.9-2.2 with Power Pool correlation 0.0, so the
+parent bar went down to Sharpe 1.3 / fitness 0.8: 44-50 YO50689 ideas per market copy then.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from .pp import check
 from .verdict import quality_gate
 
 TARGETS = ("GLB", "EUR", "ASI")
-MIN_SHARPE, MIN_FITNESS = 1.5, 1.0
+MIN_SHARPE, MIN_FITNESS = 1.3, 0.8
 STOCK = 15          # untested copies kept per account
 PER_PASS = 6
 
