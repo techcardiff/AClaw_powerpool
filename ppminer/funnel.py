@@ -5,7 +5,7 @@ in small, illiquid names (switching to TOP1000 cut Sharpe from ~2.4 to ~1.2).
 Settings sweeps can't fix where an alpha makes money, so the funnel changes the
 expression for that check and only uses settings where settings are the cause:
 
-  sub-universe sharpe   size-bucket neutralization, trade liquid names only, TOP1000
+  sub-universe sharpe   trade liquid names only, TOP1000
   concentrated weight   rank(), truncation 0.05
   low fitness/turnover  ts_decay_linear smoothing, higher decay
   low sharpe only       other neutralizations
@@ -46,8 +46,9 @@ def fixes(expr: str, settings: dict, fails: list[str], checks: dict) -> list[tup
     out: list[tuple[str, str, dict]] = []
     s = dict(settings)
     if "LOW_SUB_UNIVERSE_SHARPE" in fails:
-        out.append(("liquidity: neutralize within size buckets",
-                    f'group_neutralize({expr}, bucket(rank(cap), range="0.1,1,0.1"))', s))
+        # all funnel runs to 30 Oct: trade-liquid-only fixed the check in 23 of 133 and kept
+        # the bar in 19; size-bucket neutralization fixed 3 of 132 (dropped); TOP1000 fixed
+        # 103 of 116 but halved Sharpe, so none stayed above the bar
         out.append(("liquidity: trade liquid names only",
                     f"trade_when(rank(adv20) > {LIQUID_ONLY}, {expr}, -1)", s))
         if s.get("universe") == "TOP3000":

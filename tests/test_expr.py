@@ -116,7 +116,7 @@ def test_funnel_fixes_target_the_failing_check():
     s = {"universe": "TOP3000", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
     out = fixes("rank(x)", s, ["LOW_SUB_UNIVERSE_SHARPE"], {})
     whys = [w for w, _, _ in out]
-    assert whys[0].startswith("liquidity: neutralize within size buckets")
+    assert whys[0] == "liquidity: trade liquid names only" and not any("size buckets" in w for w in whys)
     assert any(st.get("universe") == "TOP1000" for _, _, st in out)
     assert fixes("rank(x)", s, ["SELF_CORRELATION", "LOW_SUB_UNIVERSE_SHARPE"], {}) == []
     faded = {"LOW_2Y_SHARPE": {"result": "FAIL", "value": 0.3}}
