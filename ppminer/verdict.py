@@ -28,6 +28,10 @@ def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool =
         reasons.append(f"PP correlation {ppc.get('value', '?')} > {ppc.get('limit', 0.5)}")
     if require_theme and not (theme_ok if theme_ok is not None else matched_pp_themes(list(checks.values()))):
         reasons.append("no Power Pool theme")
+    if res("LOW_SUB_UNIVERSE_SHARPE") == "FAIL":
+        # 30 Oct: BRAIN refused JjeYOgaO (403) on this check alone; none of the 23 accepted
+        # Power Pool submissions failed it (they did fail self/prod correlation, ladder)
+        reasons.append("sub-universe sharpe (BRAIN refuses the submission)")
     if not ppc and res("CONCENTRATED_WEIGHT") == "FAIL":
         # BRAIN never computes the correlation checks for these, they stay PENDING forever
         reasons.append("concentrated weight (BRAIN skips its correlation checks)")
@@ -45,9 +49,6 @@ def verdict(sharpe: float | None, checks_json: str | None, require_theme: bool =
     two_y = (checks.get("LOW_2Y_SHARPE") or {}).get("value")
     if two_y is not None and two_y < 0.5:
         risk.append(f"last-2y sharpe {two_y}")
-    sub = (checks.get("LOW_SUB_UNIVERSE_SHARPE") or {}).get("value")
-    if sub is not None and sub < 0:
-        risk.append(f"sub-universe sharpe {sub}")
     return ("risky", risk) if risk else ("pp_ok", [])
 
 

@@ -186,3 +186,19 @@ def test_pp_fixes_smooth_high_turnover_within_power_pool_shape():
     assert calm and all("neutralization" in w for w, _, _ in calm)
     long = "rank(ts_rank(ts_zscore(ts_mean(ts_delta(ts_std_dev(x, 5), 5), 5), 5), 5))" + " + rank(x)" * 1
     assert all(e != f"ts_decay_linear({long}, 5)" for _, e, _ in pp_fixes(long, s, 0.3))   # would be 9 ops
+
+
+def test_sub_universe_fail_blocks_power_pool_and_gets_liquidity_fix():
+    import json
+    from ppminer.funnel import pp_fixes
+    from ppminer.verdict import verdict
+    chk = json.dumps([{"name": "POWER_POOL_CORRELATION", "result": "PASS"},
+                      {"name": "LOW_SUB_UNIVERSE_SHARPE", "result": "FAIL", "value": 1.02, "limit": 1.15},
+                      {"name": "IS_LADDER_SHARPE", "result": "FAIL"}, {"name": "PROD_CORRELATION", "result": "FAIL"}])
+    assert verdict(2.21, chk)[0] == "not_pp"                 # JjeYOgaO, refused by BRAIN on 30 Oct
+    assert verdict(2.21, chk.replace('"FAIL", "value": 1.02', '"PASS", "value": 1.02'))[0] == "pp_ok"   # ladder/prod don't block
+    s = {"universe": "TOP2500", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
+    out = pp_fixes("group_rank(ts_zscore(a / b, 252), bucket(rank(cap), range='0.2, 1, 0.2'))", s, 0.13, sub_fail=True)
+    assert out[0][1].startswith("trade_when(rank(cap) > ") and any(st["neutralization"] == "INDUSTRY" for _, _, st in out)
+    three = pp_fixes("group_rank(a / b, bucket(rank(c), range='0.2, 1, 0.2'))", s, 0.13, sub_fail=True)
+    assert not any(e.startswith("trade_when") for _, e, _ in three)     # rank(cap) would be a 4th field
