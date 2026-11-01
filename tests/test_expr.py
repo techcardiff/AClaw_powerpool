@@ -176,16 +176,14 @@ def test_quality_gate_blocks_degenerate_alpha():
     assert any("concentrated" in x for x in low) and any("fitness" in x for x in low) and any("returns" in x for x in low)
 
 
-def test_pp_fixes_smooth_high_turnover_within_power_pool_shape():
+def test_pp_fixes_only_try_industry_neutralization():
     from ppminer.funnel import pp_fixes
     s = {"universe": "TOP3000", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
-    out = pp_fixes("group_rank(ts_rank(x, 60), country)", s, 0.36)
-    assert out[0][1] == "ts_decay_linear(group_rank(ts_rank(x, 60), country), 5)"
-    assert any(st.get("decay") == 10 for _, _, st in out)
-    calm = pp_fixes("rank(x)", s, 0.02)                     # low turnover: smoothing can't help fitness
-    assert calm and all("neutralization" in w for w, _, _ in calm)
-    long = "rank(ts_rank(ts_zscore(ts_mean(ts_delta(ts_std_dev(x, 5), 5), 5), 5), 5))" + " + rank(x)" * 1
-    assert all(e != f"ts_decay_linear({long}, 5)" for _, e, _ in pp_fixes(long, s, 0.3))   # would be 9 ops
+    out = pp_fixes("group_rank(ts_rank(x, 60), country)", s)
+    assert [(e, st["neutralization"]) for _, e, st in out] == [("group_rank(ts_rank(x, 60), country)", "INDUSTRY")]
+    assert pp_fixes("rank(x)", dict(s, neutralization="INDUSTRY")) == []
+    four = "rank(a) + rank(b) + rank(c) + rank(d)"
+    assert pp_fixes(four, s) == []                           # not Power Pool shaped: 4 fields
 
 
 def test_sub_universe_fail_blocks_power_pool_and_gets_liquidity_fix():
@@ -198,7 +196,5 @@ def test_sub_universe_fail_blocks_power_pool_and_gets_liquidity_fix():
     assert verdict(2.21, chk)[0] == "not_pp"                 # JjeYOgaO, refused by BRAIN on 30 Oct
     assert verdict(2.21, chk.replace('"FAIL", "value": 1.02', '"PASS", "value": 1.02'))[0] == "pp_ok"   # ladder/prod don't block
     s = {"universe": "TOP2500", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
-    out = pp_fixes("group_rank(ts_zscore(a / b, 252), bucket(rank(cap), range='0.2, 1, 0.2'))", s, 0.13, sub_fail=True)
-    assert out[0][1].startswith("trade_when(rank(cap) > ") and any(st["neutralization"] == "INDUSTRY" for _, _, st in out)
-    three = pp_fixes("group_rank(a / b, bucket(rank(c), range='0.2, 1, 0.2'))", s, 0.13, sub_fail=True)
-    assert not any(e.startswith("trade_when") for _, e, _ in three)     # rank(cap) would be a 4th field
+    out = pp_fixes("group_rank(ts_zscore(a / b, 252), bucket(rank(cap), range='0.2, 1, 0.2'))", s, sub_fail=True)
+    assert [(w, st["neutralization"]) for w, _, st in out] == [("pp liquidity: neutralization INDUSTRY", "INDUSTRY")]

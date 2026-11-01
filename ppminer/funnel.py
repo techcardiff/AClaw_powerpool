@@ -12,12 +12,12 @@ expression for that check and only uses settings where settings are the cause:
   self-correlation, faded last-2y edge   stop: no change fixes these
 
 Power Pool near misses outside USA (pp_parents): results that pass the Power Pool rules
-but sit below the quality bar on Sharpe or fitness. 30 Oct: 22 GLB results passed at
-Sharpe 1.1-1.4 with fitness 0.4-0.8, mostly at turnover 0.2-0.4, and none was ever
-retried. They get smoothing (ts_decay_linear, decay 10) when turnover is high and
-other neutralizations otherwise, within the Power Pool shape (8 operators, 3 fields).
-Results above the bar whose only Power Pool problem is LOW_SUB_UNIVERSE_SHARPE (BRAIN
-refuses those) get the liquidity fix first: trade only the larger names (rank(cap)).
+but sit below the quality bar on Sharpe or fitness, and results above the bar whose only
+Power Pool problem is LOW_SUB_UNIVERSE_SHARPE (BRAIN refuses those). They get INDUSTRY
+neutralization only. 47 runs to 1 Nov: smoothing (decay 10, ts_decay_linear 5) cost
+0.2-0.26 Sharpe and 0.1 fitness in GLB, trading larger names only cost 0.65 Sharpe,
+truncation 0.05 changed nothing and MARKET neutralization cost 0.13; INDUSTRY was about
+neutral on average, improved 2 of 10, and gave 9qxKPxmq (submitted 31 Oct).
 
 Each parent gets each fix at most once (tried expression+settings pairs are
 skipped) and fixes can stack up to MAX_DEPTH levels.
@@ -33,9 +33,8 @@ from .verdict import quality_gate, regular_verdict, verdict
 
 MAX_DEPTH = 2
 LIQUID_ONLY = 0.3            # trade only names above this adv20 rank
-PP_MIN_SHARPE = 1.1          # Power Pool near misses worth smoothing
-PP_SMOOTH_TURNOVER = 0.1     # above this, fitness is lost to trading
-PP_GAPS = ("sharpe ", "fitness ", "turnover ")   # quality-bar gaps a setting or smoothing can close
+PP_MIN_SHARPE = 1.1          # Power Pool near misses worth retrying
+PP_GAPS = ("sharpe ", "fitness ", "turnover ")   # quality-bar gaps a neutralization can close
 PP_MAX_FIELDS = 3
 GROUPS = {"market", "sector", "industry", "subindustry", "country", "exchange"}
 SUB_FAIL = "sub-universe sharpe (BRAIN refuses the submission)"
@@ -88,28 +87,13 @@ def _pp_shape(expr: str) -> bool:
     return a.ok and a.n_ops <= MAX_OPS and len(a.names - GROUPS) <= PP_MAX_FIELDS
 
 
-def pp_fixes(expr: str, settings: dict, turnover: float | None, sub_fail: bool = False) -> list[tuple[str, str, dict]]:
-    """Fixes for a Power Pool result below the quality bar on Sharpe/fitness (or failing
-    only the sub-universe check: sub_fail), best first."""
-    s = dict(settings)
-    out: list[tuple[str, str, dict]] = []
-    if sub_fail:
-        # 30 Oct EUR: trade_when(rank(cap) > 0.3) fixed the check but cost a third of the
-        # Sharpe; INDUSTRY neutralization and cap buckets moved it most of the way
-        out.append(("pp liquidity: trade larger names only", f"trade_when(rank(cap) > {LIQUID_ONLY}, {expr}, -1)", s))
-        if s.get("neutralization") != "INDUSTRY":
-            out.append(("pp liquidity: neutralization INDUSTRY", expr, dict(s, neutralization="INDUSTRY")))
-        if (s.get("truncation") or 0.08) > 0.05:
-            out.append(("pp liquidity: truncation 0.05", expr, dict(s, truncation=0.05)))
-        return [o for o in out if _pp_shape(o[1])]
-    if (turnover or 0) > PP_SMOOTH_TURNOVER:
-        out.append(("pp fitness: ts_decay_linear 5", f"ts_decay_linear({expr}, 5)", s))
-        if (s.get("decay") or 0) < 10:
-            out.append(("pp fitness: decay 10", expr, dict(s, decay=10)))
-    for nn in ("INDUSTRY", "SUBINDUSTRY", "MARKET"):
-        if s.get("neutralization") != nn and len(out) < 3:
-            out.append((f"pp sharpe: neutralization {nn}", expr, dict(s, neutralization=nn)))
-    return [o for o in out if _pp_shape(o[1])]
+def pp_fixes(expr: str, settings: dict, sub_fail: bool = False) -> list[tuple[str, str, dict]]:
+    """INDUSTRY neutralization for a Power Pool near miss (sub_fail: one failing only the
+    sub-universe check); nothing when it already uses INDUSTRY."""
+    if settings.get("neutralization") == "INDUSTRY" or not _pp_shape(expr):
+        return []
+    why = "pp liquidity" if sub_fail else "pp sharpe"
+    return [(f"{why}: neutralization INDUSTRY", expr, dict(settings, neutralization="INDUSTRY"))]
 
 
 def pp_parents(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
@@ -167,7 +151,7 @@ def _regular_fixes(p) -> list[tuple[str, str, dict]]:
 
 
 def _pp_fixes(p) -> list[tuple[str, str, dict]]:
-    return pp_fixes(p["expr"], json.loads(p["settings"]), p["turnover"], sub_fail=verdict(p["sharpe"], p["checks"])[1] == [SUB_FAIL])
+    return pp_fixes(p["expr"], json.loads(p["settings"]), sub_fail=verdict(p["sharpe"], p["checks"])[1] == [SUB_FAIL])
 
 
 def next_jobs(conn: sqlite3.Connection, account: str, room: int, budget=None,
