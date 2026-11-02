@@ -203,3 +203,25 @@ def test_sims_today_counts_since_midnight_new_york(monkeypatch):
     mx.execute("create table mx_jobs (account text, created_at text)")
     mx.execute("insert into mx_jobs values ('A1', '2026-11-02 06:00:00')")
     assert scheduler.sims_today(c, "A1") == 2 and scheduler.sims_today(c, "A1", mx) == 3
+
+
+def test_whole_chunk_bare_fail_reruns_alphas_one_at_a_time(monkeypatch):
+    from ppminer import db, lanes, runner
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    c.executescript(db.SCHEMA); lanes.migrate(c)
+    st = json.dumps({"region": "EUR", "universe": "TOP2500", "delay": 1})
+    ids = [c.execute("insert into resims(candidate_id, account, expr, settings, status) values (?,?,?,?,'queued')",
+                     (k, "A1", f"rank(x{k})", st)).lastrowid for k in range(3)]
+
+    class FakeBrain:
+        def multi_simulate(self, items):
+            if len(items) > 1:
+                return [RuntimeError("simulation failed: FAIL ") for _ in items]
+            e = items[0][0]
+            return [RuntimeError("simulation failed: ERROR bad field") if e == "rank(x1)" else {"id": "AL" + e[-2]}]
+    monkeypatch.setattr(runner, "checked", lambda b, a: {"alpha_id": a["id"], "sharpe": 0.1, "fitness": 0.1, "turnover": 0.1,
+                                                          "returns": 0.01, "drawdown": 0.1, "checks": []})
+    runner.run_jobs(c, FakeBrain(), "A1", ids, workers=2, slots=1)
+    got = {r["id"]: (r["status"], r["alpha_id"], r["error"]) for r in c.execute("select id, status, alpha_id, error from resims")}
+    assert got[ids[0]][:2] == ("done", "AL0") and got[ids[2]][:2] == ("done", "AL2")
+    assert got[ids[1]][0] == "error" and "bad field" in got[ids[1]][2]

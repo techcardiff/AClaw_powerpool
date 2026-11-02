@@ -156,6 +156,10 @@ def _chunks(rows: dict, ids: list[int]) -> list[list[int]]:
     return [g[k:k + MULTISIM_SIZE] for g in groups.values() for k in range(0, len(g), MULTISIM_SIZE)]
 
 
+def _bare_fail(a) -> bool:
+    return isinstance(a, Exception) and str(a).strip() == "simulation failed: FAIL"
+
+
 def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slots: int = 2,
              extra: list[dict] | None = None, mx=None) -> dict:
     """Simulate a batch as BRAIN multi-simulations, `slots` of them in flight (up to 10
@@ -177,7 +181,14 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
             return e
 
     def sim_chunk(chunk):
-        alphas = brain.multi_simulate([(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk])
+        items = [(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk]
+        alphas = brain.multi_simulate(items)
+        if len(items) > 1 and all(_bare_fail(a) for a in alphas):
+            # BRAIN sometimes fails a whole multi-simulation with a bare FAIL and no reason
+            # (23 of 24 such chunks, 31 Oct - 2 Nov, had no real error in them); one at a
+            # time each alpha gets its result or its own error message
+            with ThreadPoolExecutor(max(1, workers)) as cx:
+                alphas = list(cx.map(lambda it: brain.multi_simulate([it])[0], items))
         with ThreadPoolExecutor(max(1, workers)) as cx:
             return list(zip(chunk, cx.map(check_one, alphas)))
 
