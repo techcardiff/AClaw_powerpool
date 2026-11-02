@@ -136,3 +136,17 @@ def test_lane_a_runs_market_copies_past_the_collision_filter(monkeypatch):
     monkeypatch.setattr(lanes, "shortlist", fake_shortlist)
     ids = [r["id"] for r in lanes.lane_a(None, "A1", 5)]
     assert 1 in ids and 2 in ids and 3 not in ids            # other account's family stays out
+
+
+def test_explore_tops_up_when_queued_ideas_are_unusable(monkeypatch):
+    """31 Oct - 2 Nov: hundreds of untested explore rows per region (other account's
+    families, saturated datasets) kept Qwen explore off while batches shrank to 3-7."""
+    from ppminer import explore, lanes, runner
+    calls = []
+    monkeypatch.setattr(lanes, "usable_ideas", lambda c, a, o=(), statuses=("explore",): {"GLB": 2, "USA": 40})
+    monkeypatch.setattr(explore, "fresh_datasets", lambda c, a, r: [{"dataset": f"{r}_ds"}])
+    monkeypatch.setattr(explore, "explore", lambda c, cat, a, ds, r, theme=None: calls.append(r) or [{}])
+    monkeypatch.setattr(explore, "save", lambda c, ds, rows, r: len(rows))
+    monkeypatch.setattr(runner, "_ro", lambda c: c)
+    assert runner.explore_regions(None, None, "A1", ["USA", "GLB"], others=["A1", "B2"]) == 1
+    assert calls == ["GLB"]                                  # USA has 40 usable: no top-up

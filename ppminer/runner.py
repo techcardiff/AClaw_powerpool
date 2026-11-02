@@ -335,15 +335,13 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
 
 
 def explore_regions(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10,
-                    theme=None) -> int:
-    """Keep a small stock of unsimulated explore ideas in every region the account has synced."""
+                    theme=None, others: list[str] = ()) -> int:
+    """Keep a small stock of explore ideas Lane A can use, in every region the account has synced."""
     from .explore import explore, fresh_datasets, save as save_explore
     added = 0
+    usable = lanes.usable_ideas(conn, account, others)
     for region in regions:
-        queued = conn.execute("""select count(*) from candidates c where c.status='explore' and c.region=?
-                                 and not exists (select 1 from resims r where r.candidate_id=c.id and r.account=?)""",
-                              (region, account)).fetchone()[0]
-        if queued >= min_queue:
+        if usable.get(region, 0) >= min_queue:
             continue
         for ds in fresh_datasets(conn, account, region)[:per_region]:
             try:
@@ -387,7 +385,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
-    n = explore_regions(conn, catalog, account, list(regions), theme=theme)
+    n = explore_regions(conn, catalog, account, list(regions), theme=theme, others=others)
     if n:
         log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
     try:

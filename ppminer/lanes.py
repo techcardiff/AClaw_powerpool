@@ -222,6 +222,24 @@ def theme_datasets(conn: sqlite3.Connection, theme, accounts: list[str]) -> set[
         (*accounts, *sorted(theme.regions)))}
 
 
+def usable_ideas(conn: sqlite3.Connection, account: str, others: list[str] = (), statuses=("explore",)) -> dict[str, int]:
+    """Untested ideas per region that Lane A would actually hand `account` (same filters
+    as lane_a). Counting every untested row kept Qwen explore off from 31 Oct: hundreds
+    per region looked queued, but the other account's families, saturated datasets and
+    the per-dataset cap left 3-7 per batch, and batches shrank from ~28 to 3-7 alphas."""
+    pp, _ = collide_stems(conn, account)
+    o_ids, o_stems, o_exprs = other_accounts(conn, account, list(others))
+    rows = shortlist(conn, None, n=10**6, statuses=statuses, account=account, skip_done=True,
+                     exclude_stems=pp | o_stems, exclude_exprs=submitted_exprs(conn, account) | o_exprs,
+                     exclude_datasets=saturated_datasets(conn, account), max_per_dataset=3,
+                     max_sharpe=SUSPICIOUS_SHARPE)
+    out: dict[str, int] = {}
+    for r in rows:
+        if r["id"] not in o_ids:
+            out[r["region"]] = out.get(r["region"], 0) + 1
+    return out
+
+
 def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (), theme=None,
            budget: Budget | None = None, skip_ids: set[int] = frozenset()) -> list[sqlite3.Row]:
     budget = budget or Budget(conn)
