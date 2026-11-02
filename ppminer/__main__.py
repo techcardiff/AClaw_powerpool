@@ -225,6 +225,15 @@ def cmd_cookie(args):
             print(f"{os.path.basename(path)}: saved as {name} (user {who['user_id']}, {_hours(who['expiry_seconds'])})")
 
 
+def cmd_themes(args):
+    from .themes_fetch import FetchError, run
+    try:
+        for t in run(host=args.from_host, dry_run=args.dry_run):
+            print(f"{t['start']} .. {t['end']}  {t['name']}: {t['rule']}")
+    except FetchError as e:
+        sys.exit(f"themes: {e}")
+
+
 def cmd_telegram(args):
     from .telegram import Broker, ConfigError, load_config
     try:
@@ -456,6 +465,10 @@ def main(argv=None):
                     help="run = bot + automatic renewals; login = one login now; check = test config + send a test message")
     sp.add_argument("--account")
     sp.set_defaults(fn=cmd_telegram)
+    sp = sub.add_parser("themes", help="read the Power Pool themes from BRAIN's support article into data/themes.json")
+    sp.add_argument("--from-host", help="read the session over SSH from this host (default: data/secrets here)")
+    sp.add_argument("--dry-run", action="store_true", help="fetch and parse only")
+    sp.set_defaults(fn=cmd_themes)
     sp = sub.add_parser("picklist", help="cluster passing alphas by PnL correlation, one pick per cluster")
     sp.add_argument("--account", required=True)
     sp.add_argument("--threshold", type=float, default=0.5)

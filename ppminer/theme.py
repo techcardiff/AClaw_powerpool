@@ -150,7 +150,7 @@ def detect(conn, themes: list[Theme] = (), recent: int = 300) -> Theme | None:
             break
     if name:
         for t in themes:
-            if t.name == name:
+            if _same_name(t.name, name):
                 return t
         t = from_name(name)
         if t.regions or t.categories:
@@ -159,9 +159,23 @@ def detect(conn, themes: list[Theme] = (), recent: int = 300) -> Theme | None:
     return act[0] if act else None
 
 
+def _same_name(a: str, b: str) -> bool:
+    """The support article writes Nov'26, BRAIN's checks Nov`26."""
+    return re.sub(r"[`'’‘]", "`", a.strip()) == re.sub(r"[`'’‘]", "`", b.strip())
+
+
 THEMES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "themes.json")
+FETCHED_PATH = os.path.join(os.path.dirname(THEMES_PATH), "data", "themes.json")   # themes_fetch.py
+
+
+def all_themes() -> list[Theme]:
+    """Repository themes.json plus the themes read from BRAIN's support article
+    (data/themes.json, written by themes_fetch.py); the article wins on a name clash."""
+    fetched = load_themes(FETCHED_PATH) if os.path.exists(FETCHED_PATH) else []
+    base = load_themes(THEMES_PATH) if os.path.exists(THEMES_PATH) else []
+    return fetched + [t for t in base if not any(_same_name(t.name, f.name) for f in fetched)]
 
 
 def current(conn) -> Theme | None:
-    """detect() with themes.json, as the scheduler steers by it."""
-    return detect(conn, load_themes(THEMES_PATH) if os.path.exists(THEMES_PATH) else [])
+    """detect() with all known themes, as the scheduler steers by it."""
+    return detect(conn, all_themes())

@@ -113,3 +113,53 @@ def test_verdict_uses_callers_theme_decision():
     chk = json.loads(_checks(1.12)) + [{"name": "POWER_POOL_CORRELATION", "result": "PASS", "value": 0.2}]
     assert "no Power Pool theme" in verdict(1.3, json.dumps(chk), require_theme=True)[1]
     assert verdict(1.3, json.dumps(chk), require_theme=True, theme_ok=True)[0] == "pp_ok"
+
+
+ARTICLE = """Current month Power Pool Themes
+October 31, 2026 17:00 Updated ~ minute read
+November
+Mo\tTu\tWe\tTh\tFr\tSa\tSu
+26 Oct\t27 Oct\t28 Oct\t29 Oct\t30 Oct\t31 Oct\t1 Nov
+
+
+GLB/D1 Power Pool Nov'26: region=GLB & delay=1 & AMER Sharpe > 1
+
+
+2\t3\t4\t5\t6\t7\t8
+
+
+GLB/D1 Power Pool Nov'26: region=GLB & delay=1 & AMER Sharpe > 1
+
+
+23\t24\t25\t26\t27\t28\t29
+
+
+ 
+30\t \t \t \t \t \t 
+Was this article helpful?
+"""
+
+
+def test_article_calendar_parses_to_theme_spans():
+    from ppminer.themes_fetch import merge, parse
+    rows = parse(ARTICLE, 2026)
+    assert rows == [{"name": "GLB/D1 Power Pool Nov`26", "start": "2026-10-26", "end": "2026-11-08",
+                     "rule": "region=GLB & delay=1 & AMER Sharpe > 1"}]        # empty weeks end the theme
+    old = [{"name": "GLB/D1 Power Pool Nov`26", "start": "2026-10-26", "end": "2026-11-29", "rule": "x"},
+           {"name": "D1 Power Pool Oct`26", "start": "2026-09-28", "end": "2026-10-11", "rule": "delay=1"}]
+    assert [r["end"] for r in merge(old, rows)] == ["2026-10-11", "2026-11-08"]   # past themes kept, current replaced
+
+
+def test_fetched_themes_override_the_repository_file(tmp_path, monkeypatch):
+    import json as _j
+    from ppminer import theme as th
+    repo, fetched = tmp_path / "themes.json", tmp_path / "fetched.json"
+    repo.write_text(_j.dumps([{"name": "GLB/D1 Power Pool Nov`26", "start": "2026-10-26", "end": "2026-11-29", "rule": "region=GLB"},
+                              {"name": "Old", "start": "2026-09-01", "end": "2026-09-30", "rule": "delay=1"}]))
+    fetched.write_text(_j.dumps([{"name": "GLB/D1 Power Pool Nov'26", "start": "2026-10-26", "end": "2026-11-22",
+                                  "rule": "region=GLB & delay=1 & AMER Sharpe > 1"}]))
+    monkeypatch.setattr(th, "THEMES_PATH", str(repo))
+    monkeypatch.setattr(th, "FETCHED_PATH", str(fetched))
+    got = {t.name: t for t in th.all_themes()}
+    assert set(got) == {"GLB/D1 Power Pool Nov'26", "Old"} and str(got["GLB/D1 Power Pool Nov'26"].end) == "2026-11-22"
+    assert th._same_name("GLB/D1 Power Pool Nov'26", "GLB/D1 Power Pool Nov`26")
