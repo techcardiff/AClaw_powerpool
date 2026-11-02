@@ -65,6 +65,7 @@ DEFAULTS = {
     "renew_before_minutes": 30,
     "quiet_hours": [0, 7],         # local hours [start, end) with no automatic messages
     "scan_wait_minutes": 10,
+    "relogin_after_seconds": 60,   # a new /login replaces a pending face-scan link this old
     "retry_after_minutes": 60,     # resend an unanswered link at most hourly
     "admin_chat_ids": [],          # get copies of everyone's logout / login-ok notices
     "auto_prompt": True,           # false = only notify, owner sends /login themselves
@@ -114,6 +115,7 @@ class Broker:
         self.http_factory, self.now, self.sleep = http_factory, now, sleep
         self.lock = threading.Lock()
         self.running: dict[str, float] = {}        # account -> start time of the login in progress
+        self.current: dict[str, object] = {}       # account -> token of that login; older ones stop polling
         self.last_prompt: dict[str, float] = {}
         self.logged_out: set[str] = set()          # accounts we already sent a logout notice for
 
@@ -129,18 +131,22 @@ class Broker:
         stale_after = (self.cfg["scan_wait_minutes"] + 5) * 60
         with self.lock:
             started = self.running.get(account)
-            if started is not None and self.now() - started < stale_after:
+            age = self.now() - started if started is not None else None
+            relogin = self.cfg.get("relogin_after_seconds", 60)
+            if age is not None and age < stale_after and not (reason == "requested" and age >= relogin):
                 _log(f"{account}: login already in progress ({reason})")
                 if reason == "requested":
                     self.tg.send(self.cfg["accounts"][account]["chat_id"],
-                                 f"⏳ {account}: a login is already in progress; use the last Verify face button.")
+                                 f"⏳ {account}: a login started {int(age)} s ago; use the last Verify face button, "
+                                 f"or send /login {account} again after {relogin} s for a new link.")
                 return False
-            if started is not None:
-                _log(f"{account}: previous login attempt looks stuck, starting a new one")
-            self.running[account] = self.now()
+            if age is not None:
+                _log(f"{account}: replacing the previous login attempt ({int(age)} s old)")
+            token = object()
+            self.running[account], self.current[account] = self.now(), token
         _log(f"{account}: login started ({reason})")
         try:
-            ok = self._login(account, reason)
+            ok = self._login(account, reason, token)
             _log(f"{account}: login {'succeeded' if ok else 'did not complete'}")
             return ok
         except Exception as e:
@@ -148,9 +154,11 @@ class Broker:
             raise
         finally:
             with self.lock:
-                self.running.pop(account, None)
+                if self.current.get(account) is token:      # a newer login owns the entry otherwise
+                    self.running.pop(account, None)
+                    self.current.pop(account, None)
 
-    def _login(self, account: str, reason: str) -> bool:
+    def _login(self, account: str, reason: str, token: object = None) -> bool:
         a = self.cfg["accounts"][account]
         chat = a["chat_id"]
         s = self.http_factory()
@@ -170,6 +178,9 @@ class Broker:
         start, reminded = self.now(), False
         while self.now() - start < wait:
             self.sleep(10)
+            if token is not None and self.current.get(account) is not token:
+                _log(f"{account}: replaced by a newer login, no longer waiting on the old link")
+                return False
             if s.post(link, timeout=60).status_code == 201:
                 return self._finish(account, s, chat, "face scan accepted")
             if not reminded and self.now() - start > wait / 2:

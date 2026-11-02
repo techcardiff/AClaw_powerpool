@@ -197,10 +197,33 @@ def test_stuck_login_expires_and_duplicate_gets_reply():
     b.lock, b.tg = threading.Lock(), TG()
     clock = [1000.0]
     b.now = lambda: clock[0]
-    b._login = lambda account, reason: True
-    b.running = {"X": 1000.0}
+    b._login = lambda account, reason, token=None: True
+    b.running, b.current = {"X": 1000.0}, {}
     assert b.login("X", "requested") is False                 # fresh attempt in progress: reply, don't start
-    assert any("already in progress" in t for t in sent)
+    assert any("started 0 s ago" in t for t in sent)
     clock[0] += 16 * 60                                       # older than scan window + 5 min: treat as stuck
     assert b.login("X", "requested") is True
     assert "X" not in b.running
+
+
+
+def test_new_login_after_a_minute_replaces_pending_link(saved):
+    clock = Clock()
+    b = broker(FakeSession(scan_after=1), clock)
+    old = object()
+    b.running, b.current = {"acc1": clock.t}, {"acc1": old}     # a link sent just now, not scanned yet
+    clock.t += 30
+    assert b.login("acc1", "requested") is False                 # within the minute: refused, told to wait
+    assert "started 30 s ago" in b.tg.sent[-1][1]
+    assert b.login("acc1", "renewal") is False                   # automatic renewals never replace a link
+    clock.t += 31
+    assert b.login("acc1", "requested") is True                  # after a minute: a new link, scanned
+    assert saved["acc1"] == "t=tok" and "acc1" not in b.running
+
+
+def test_replaced_login_stops_polling_quietly(saved):
+    b = broker(FakeSession(scan_after=10 ** 6))
+    token = object()
+    b.current["acc1"] = object()                                  # a newer login took over
+    assert b._login("acc1", "requested", token) is False
+    assert not any("link expired" in t for _, t, _ in b.tg.sent)
