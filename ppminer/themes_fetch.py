@@ -104,6 +104,9 @@ def merge(old: list[dict], new: list[dict]) -> list[dict]:
 
 # ── Chrome ──────────────────────────────────────────────────────────────────
 def _chrome() -> str:
+    """PP_CHROME (e.g. Chrome for Testing unpacked without sudo), else an installed Chrome."""
+    if (p := os.getenv("PP_CHROME")) and os.path.exists(p):
+        return p
     for c in CHROME_PATHS.get(platform.system(), []):
         p = c if os.path.isabs(c) else shutil.which(c)
         if p and os.path.exists(p):

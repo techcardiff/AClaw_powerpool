@@ -7,7 +7,8 @@ set -u
 cd "$(dirname "$0")/.."
 mkdir -p data/logs
 if ! pgrep -f "THEMES_LOOP" >/dev/null; then
-  nohup bash -c "THEMES_LOOP=1; while true; do PP_THEMES_SYNC=qa-3080:/data/aclaw_powerpool/data/ .venv/bin/python -m ppminer themes >> data/logs/themes.log 2>&1; sleep 21600; done" > /dev/null 2>&1 &
+  # Chrome for Testing in .chrome (no sudo), shown on the logged-in desktop (:1)
+  nohup bash -c "THEMES_LOOP=1; while true; do DISPLAY=\${DISPLAY:-:1} PP_CHROME=\$PWD/.chrome/chrome-linux64/chrome PP_THEMES_SYNC=qa-3080:/data/aclaw_powerpool/data/ .venv/bin/python -m ppminer themes >> data/logs/themes.log 2>&1; sleep 21600; done" > /dev/null 2>&1 &
   echo "themes fetch started (loop pid $!)"
 fi
 if pgrep -f "[.]venv/bin/python -m ppminer telegram run" >/dev/null; then echo "broker already running"; exit 0; fi
