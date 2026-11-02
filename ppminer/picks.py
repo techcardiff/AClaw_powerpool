@@ -107,7 +107,9 @@ def build(conn: sqlite3.Connection, account: str, threshold: float = 0.5) -> lis
     rows = passing(conn, account)
     prior = {r["alpha_id"]: r["status"] for r in conn.execute("select alpha_id, status from picks where account=?", (account,))}
     decided_rank = {"submitted": 0, "approved": 1}
-    rows.sort(key=lambda r: (decided_rank.get(prior.get(r["alpha_id"]), 2), -score(r)))
+    # equal scores go to the higher fitness: on 3 Nov a Sharpe-1.20 tie left YP1nZNd6 (fitness 0.75,
+    # below the theme bar) as the pick over omEAbKjn (0.81) in the same cluster
+    rows.sort(key=lambda r: (decided_rank.get(prior.get(r["alpha_id"]), 2), -score(r), -(r["fitness"] or 0)))
     series = {r["alpha_id"]: daily(conn, r["alpha_id"]) for r in rows}
 
     picks: list[dict] = []

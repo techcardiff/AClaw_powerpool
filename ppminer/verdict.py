@@ -125,13 +125,20 @@ QUALITY_DEFAULTS = {
 # alphas kept about half the Sharpe (116 funnel runs to 30 Oct, best 1.5). BRAIN's Power
 # Pool minimum is Sharpe 1.0; these bars apply on top of the account's quality bar.
 UNIVERSE_BARS = {"TOP1000": {"min_sharpe": 1.2, "min_fitness": 0.9}}
+# Alphas matching the active Power Pool theme (3 Nov: GLB, AMER Sharpe > 1). Of 2,506 GLB
+# results, 32 matched it and passed the Power Pool rules, best Sharpe 1.2 / fitness 0.8-0.95,
+# none at the default bar; GLB spans three regions, so its Sharpe runs lower than USA's.
+THEME_BAR = {"min_sharpe": 1.2, "min_fitness": 0.8}
 
 
 def quality_gate(sharpe, fitness, turnover, checks_json: str | None, bar: dict | None = None,
-                 returns: float | None = None, universe: str | None = None) -> list[str]:
+                 returns: float | None = None, universe: str | None = None, theme_match: bool = False) -> list[str]:
     """Reasons an alpha falls below the auto-submit quality bar ([] = passes).
-    `universe`: the simulation's universe, for UNIVERSE_BARS."""
+    `universe`: the simulation's universe, for UNIVERSE_BARS. `theme_match`: the alpha
+    matches the active Power Pool theme, for THEME_BAR (it only ever lowers the bar)."""
     b = {**QUALITY_DEFAULTS, **(bar or {}), **UNIVERSE_BARS.get(universe or "", {})}
+    if theme_match:
+        b.update({k: min(b[k], v) for k, v in THEME_BAR.items()})
     checks = {c.get("name"): c for c in json.loads(checks_json or "[]") or []}
     val = lambda n: (checks.get(n) or {}).get("value")
     out = []

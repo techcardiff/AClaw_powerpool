@@ -22,7 +22,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import cookies as ck
-from . import lanes, marketx, revise, templates, transfer
+from . import lanes, marketx, revise, transfer
 from .brain import AuthRequired, Brain, settings_for, summarize
 from .catalog import Catalog
 from .fields import block
@@ -357,25 +357,13 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
     return added
 
 
-def theme_ideas(conn, catalog, account: str, theme, others: list[str] = (), min_datasets: int = 6,
-                per_pass: int = 3) -> int:
-    """Keep untested template alphas (Search 1) on enough datasets of the theme's region(s)
-    for Lane A's theme share: the harvested inventory barely covers regions like GLB.
-    The shortlist takes at most 2 untested ideas per dataset, hence the dataset count."""
-    from .explore import fresh_datasets
-    added = 0
-    for region in sorted(theme.regions):
-        taken = lanes.theme_datasets(conn, theme, [o for o in others if o != account])   # the other account's
-        open_ds = {r[0] for r in conn.execute("""select distinct c.datasets from candidates c where c.status in ('template', 'explore')
-                                  and c.region=? and not exists (select 1 from resims r where r.candidate_id=c.id and r.account=?)""",
-                                              (region, account))} - taken
-        if len(open_ds) >= min_datasets:
-            continue
-        for ds in fresh_datasets(conn, account, region, theme.delay or 1, theme.categories or None)[:per_pass]:
-            rows = templates.generate(conn, catalog, account, region, "s1", ds["dataset"], 3, order="fresh") \
-                or templates.generate(conn, catalog, account, region, "s1", ds["dataset"], 3, order="coverage")
-            added += templates.save(conn, region, rows, theme.delay or 1, source=f"theme:{theme.name}")
-    return added
+def theme_ideas(conn, catalog, account: str, theme, others: list[str] = (), min_queue: int = 20,
+                per_pass: int = 4) -> int:
+    """Keep enough usable Qwen ideas in the theme's region(s) for Lane A's theme share
+    (about half a batch). Templates used to fill it: 1,582 GLB ones to 3 Nov gave no
+    theme match, Qwen's GLB ideas 18 of 868."""
+    return explore_regions(conn, catalog, account, sorted(theme.regions), per_region=per_pass, min_queue=min_queue,
+                           theme=theme, others=others)
 
 
 def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
@@ -404,7 +392,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     if theme is not None and theme.regions:
         n = theme_ideas(conn, catalog, account, theme, others)
         if n:
-            log(f"[{account}] theme {theme.name}: {n} new template alphas")
+            log(f"[{account}] theme {theme.name}: {n} new Qwen ideas")
     ids = build_batch(conn, account, min(batch, sims_left), c_share, others, theme)
     if not ids:
         return {"status": "empty", "sims": 0}

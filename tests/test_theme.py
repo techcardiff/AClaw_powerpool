@@ -163,3 +163,11 @@ def test_fetched_themes_override_the_repository_file(tmp_path, monkeypatch):
     got = {t.name: t for t in th.all_themes()}
     assert set(got) == {"GLB/D1 Power Pool Nov'26", "Old"} and str(got["GLB/D1 Power Pool Nov'26"].end) == "2026-11-22"
     assert th._same_name("GLB/D1 Power Pool Nov'26", "GLB/D1 Power Pool Nov`26")
+
+
+def test_theme_bar_lowers_the_quality_bar_for_theme_matches_only():
+    from ppminer.verdict import quality_gate
+    assert quality_gate(1.2, 0.81, 0.02, "[]") != []                     # omEAbKjn: below 1.5 / 1.0
+    assert quality_gate(1.2, 0.81, 0.02, "[]", theme_match=True) == []
+    assert quality_gate(1.17, 0.91, 0.02, "[]", theme_match=True) != []  # sharpe still under 1.2
+    assert quality_gate(1.25, 0.9, 0.02, "[]", universe="TOP1000", theme_match=True) == []   # never raises a bar

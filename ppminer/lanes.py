@@ -127,6 +127,9 @@ def submitted_exprs(conn: sqlite3.Connection, account: str) -> set[str]:
 
 # ── Lane A ──────────────────────────────────────────────────────────────────
 LANE_A_STATUSES = ("pp_ready", "pp_multi", "rewrite", "explore", "template", "transfer")
+# The theme share skips templates: to 3 Nov, 1,582 GLB templates gave 2 Power Pool passes and
+# no theme match, against 23 passes / 18 matches from 868 Qwen GLB ideas.
+THEME_STATUSES = tuple(s for s in LANE_A_STATUSES if s != "template")
 
 
 def other_accounts(conn: sqlite3.Connection, account: str, others: list[str]) -> tuple[set[int], set[str], set[str]]:
@@ -274,7 +277,7 @@ def lane_a(conn: sqlite3.Connection, account: str, n: int, others: list[str] = (
         # both accounts chase the same theme in one correlation pool: a theme dataset
         # the other account already simulates is left to it
         taken = theme_datasets(conn, theme, [o for o in others if o != account])
-        rows = [r for r in shortlist(conn, theme, n=n * 3, statuses=LANE_A_STATUSES, **common) if r["datasets"] not in taken]
+        rows = [r for r in shortlist(conn, theme, n=n * 3, statuses=THEME_STATUSES, **common) if r["datasets"] not in taken]
         take(_without(rows, o_ids, n), round(n * THEME_SHARE))
     for rows, (_, share) in zip(pools, LANE_A_GROUPS):
         take(rows, max(1, round(n * share)))

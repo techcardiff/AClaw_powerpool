@@ -225,3 +225,24 @@ def test_whole_chunk_bare_fail_reruns_alphas_one_at_a_time(monkeypatch):
     got = {r["id"]: (r["status"], r["alpha_id"], r["error"]) for r in c.execute("select id, status, alpha_id, error from resims")}
     assert got[ids[0]][:2] == ("done", "AL0") and got[ids[2]][:2] == ("done", "AL2")
     assert got[ids[1]][0] == "error" and "bad field" in got[ids[1]][2]
+
+
+def test_theme_share_skips_templates(monkeypatch):
+    from ppminer import lanes
+    from ppminer.theme import Theme
+    import datetime as _dt
+    seen = []
+
+    def fake_shortlist(c, t, n, statuses, **kw):
+        if t is not None:
+            seen.append(statuses)
+        return []
+    monkeypatch.setattr(lanes, "shortlist", fake_shortlist)
+    monkeypatch.setattr(lanes, "collide_stems", lambda c, a: (set(), set()))
+    monkeypatch.setattr(lanes, "other_accounts", lambda c, a, o: (set(), set(), set()))
+    monkeypatch.setattr(lanes, "submitted_exprs", lambda c, a: set())
+    monkeypatch.setattr(lanes, "saturated_datasets", lambda c, a: set())
+    monkeypatch.setattr(lanes, "theme_datasets", lambda c, t, a: set())
+    th = Theme(name="GLB/D1 Power Pool Nov`26", start=_dt.date(2026, 10, 26), end=_dt.date(2026, 11, 22), regions={"GLB"})
+    lanes.lane_a(None, "A1", 10, theme=th)
+    assert seen and all("template" not in st and "explore" in st for st in seen)
