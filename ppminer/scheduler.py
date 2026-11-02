@@ -44,6 +44,19 @@ def _due(conn, account: str, cfg: dict) -> bool:
     return now - last >= dt.timedelta(hours=float(cfg.get("retry_hours", 3)))
 
 
+MAX_SIMS_PER_DAY = 5000      # BRAIN's daily simulation limit per account
+
+
+def sims_today(conn, account: str, mx=None) -> int:
+    """Simulations this account started since midnight New York (resims + market exploration)."""
+    start = ny_now().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(dt.timezone.utc)
+    since = start.strftime("%Y-%m-%d %H:%M:%S")
+    n = conn.execute("select count(*) from resims where account=? and created_at >= ?", (account, since)).fetchone()[0]
+    if mx is not None:
+        n += mx.execute("select count(*) from mx_jobs where account=? and created_at >= ?", (account, since)).fetchone()[0]
+    return n
+
+
 def _autosubmit(db_path: str, catalog_dir: str, accounts: list[str]) -> None:
     """One auto-submit pass for the due accounts, off the mining thread."""
     from .db import connect
@@ -113,9 +126,19 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
         if mx_regions and theme is not None:   # the theme region is Lane A's now, not exploration's
             mx_regions = [r for r in mx_regions if r not in theme.regions] or None
         # both accounts mine at the same time, each with its own connection and catalog
+        cap = int(cfg.get("max_sims_per_day", MAX_SIMS_PER_DAY))
+
         def mine(account):
             c2 = connect(db_path)
             try:
+                mx = marketx.connect()
+                try:
+                    left = cap - sims_today(c2, account, mx)
+                finally:
+                    mx.close()
+                if left <= 0:
+                    log(f"[{account}] daily simulation limit reached ({cap}) - waiting for midnight New York")
+                    return {"status": "capped", "sims": 0}
                 catalog = Catalog(catalog_dir)
                 catalog.add_account_fields(c2, account)
                 return cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
@@ -123,7 +146,8 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                              c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
                              slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
                              market_regions=mx_regions,                         # template exploration in free slots
-                             theme=theme)                                       # Lane A theme share
+                             theme=theme,                                       # Lane A theme share
+                             sims_left=left)                                    # daily simulation limit
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")
                 return {"status": "error", "sims": 0}
@@ -132,5 +156,5 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
 
         with ThreadPoolExecutor(len(accounts)) as ex:
             results = list(ex.map(mine, accounts))
-        if all(r["status"] in ("waiting_login", "empty", "paused") for r in results):
+        if all(r["status"] in ("waiting_login", "empty", "paused", "capped") for r in results):
             time.sleep(LOGIN_POLL_SECONDS)

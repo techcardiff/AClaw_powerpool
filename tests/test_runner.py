@@ -150,3 +150,56 @@ def test_explore_tops_up_when_queued_ideas_are_unusable(monkeypatch):
     monkeypatch.setattr(runner, "_ro", lambda c: c)
     assert runner.explore_regions(None, None, "A1", ["USA", "GLB"], others=["A1", "B2"]) == 1
     assert calls == ["GLB"]                                  # USA has 40 usable: no top-up
+
+
+def test_plain_numbers_rewrites_scientific_notation():
+    from ppminer.brain import plain_numbers
+    assert plain_numbers("x / (ts_std_dev(y, 30) + 1e-8)") == "x / (ts_std_dev(y, 30) + 0.00000001)"
+    assert plain_numbers("rank(x) * 2.5E3 - field_1e5") == "rank(x) * 2500 - field_1e5"   # field names untouched
+
+
+def test_run_jobs_checks_a_chunk_in_parallel_and_keeps_order(monkeypatch):
+    import threading, time as _t
+    from ppminer import db, runner
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    c.executescript(db.SCHEMA)
+    from ppminer import lanes
+    lanes.migrate(c)
+    st = json.dumps({"region": "USA", "universe": "TOP3000", "delay": 1})
+    ids = [c.execute("insert into resims(candidate_id, account, expr, settings, status) values (?,?,?,?,'queued')",
+                     (k, "A1", f"rank(x{k})", st)).lastrowid for k in range(4)]
+    live, peak = [0], [0]
+    lock = threading.Lock()
+
+    class FakeBrain:
+        def multi_simulate(self, items):
+            return [{"id": f"AL{k}"} for k in range(len(items))]
+
+    def fake_checked(brain, a):
+        with lock:
+            live[0] += 1; peak[0] = max(peak[0], live[0])
+        _t.sleep(0.05)
+        with lock:
+            live[0] -= 1
+        return {"alpha_id": a["id"], "sharpe": 0.1, "fitness": 0.1, "turnover": 0.1, "returns": 0.01, "drawdown": 0.1,
+                "checks": []}
+    monkeypatch.setattr(runner, "checked", fake_checked)
+    runner.run_jobs(c, FakeBrain(), "A1", ids, workers=4, slots=1)
+    assert peak[0] > 1                                         # checks overlapped
+    got = {r["id"]: r["alpha_id"] for r in c.execute("select id, alpha_id from resims")}
+    assert [got[i] for i in ids] == ["AL0", "AL1", "AL2", "AL3"]   # each result lands on its own job
+
+
+def test_sims_today_counts_since_midnight_new_york(monkeypatch):
+    import datetime as _dt
+    from ppminer import scheduler
+    from zoneinfo import ZoneInfo
+    monkeypatch.setattr(scheduler, "ny_now", lambda: _dt.datetime(2026, 11, 2, 9, 0, tzinfo=ZoneInfo("America/New_York")))
+    c = sqlite3.connect(":memory:")
+    c.execute("create table resims (account text, created_at text)")
+    for ts in ("2026-11-02 04:59:00", "2026-11-02 05:01:00", "2026-11-02 13:00:00"):   # NY midnight = 05:00 UTC
+        c.execute("insert into resims values ('A1', ?)", (ts,))
+    mx = sqlite3.connect(":memory:")
+    mx.execute("create table mx_jobs (account text, created_at text)")
+    mx.execute("insert into mx_jobs values ('A1', '2026-11-02 06:00:00')")
+    assert scheduler.sims_today(c, "A1") == 2 and scheduler.sims_today(c, "A1", mx) == 3

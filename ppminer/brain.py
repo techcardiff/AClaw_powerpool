@@ -6,7 +6,9 @@ is the hook where the Telegram broker will send that link to the owner.
 """
 from __future__ import annotations
 
+import re
 import time
+from decimal import Decimal
 from typing import Callable
 from urllib.parse import urljoin
 
@@ -80,7 +82,8 @@ class Brain:
 
     # ── research calls ──────────────────────────────────────────────────────
     def simulate(self, expr: str, settings: dict) -> dict:
-        r = self._req("POST", f"{BASE}/simulations", json={"type": "REGULAR", "settings": settings, "regular": expr})
+        r = self._req("POST", f"{BASE}/simulations", json={"type": "REGULAR", "settings": settings,
+                                                         "regular": plain_numbers(expr)})
         sim = self._poll(r.headers["Location"])
         if "alpha" not in sim:       # a WARNING status (e.g. unit mismatch) still produces an alpha
             raise RuntimeError(f"simulation failed: {sim.get('status')} {sim.get('message', '')}")
@@ -96,7 +99,7 @@ class Brain:
                 raise
             except Exception as e:
                 return [e]
-        body = [{"type": "REGULAR", "settings": st, "regular": ex} for ex, st in items]
+        body = [{"type": "REGULAR", "settings": st, "regular": plain_numbers(ex)} for ex, st in items]
         r = self._req("POST", f"{BASE}/simulations", json=body)
         parent = self._poll(r.headers["Location"], max_wait=max_wait)
         children = parent.get("children") or []
@@ -157,6 +160,18 @@ class Brain:
                         "stage": a.get("stage"), "tags": a.get("tags"), "dateSubmitted": a.get("dateSubmitted")}
             time.sleep(max(ra, 5))
         raise TimeoutError(f"submit of {alpha_id} still running after {max_wait}s")
+
+
+_SCI = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)[eE]([-+]?\d+)(?![\w.])")
+
+
+def plain_numbers(expr: str) -> str:
+    """1e-8 -> 0.00000001: BRAIN rejects scientific notation ('Unexpected character e'),
+    and Qwen still writes it (2 of 29 explore jobs on 2 Nov)."""
+    def plain(m):
+        t = format(Decimal(m.group(0)), "f")
+        return (t.rstrip("0").rstrip(".") if "." in t else t) or "0"
+    return _SCI.sub(plain, expr)
 
 
 def settings_for(row, *, universe: str | None = None) -> dict:

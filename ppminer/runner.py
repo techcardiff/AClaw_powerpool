@@ -164,32 +164,27 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
     batch, so it runs in the first slot that frees up."""
     rows = {i: conn.execute("select * from resims where id=?", (i,)).fetchone() for i in ids}
 
+    def check_one(a):
+        # BRAIN's /check takes ~1 min per alpha; one at a time it held each account to
+        # ~55 results/hour (2 Nov), so a chunk's checks run `workers` at a time
+        if isinstance(a, Exception):
+            return a
+        try:
+            return checked(brain, a)
+        except AuthRequired:
+            raise
+        except Exception as e:
+            return e
+
     def sim_chunk(chunk):
         alphas = brain.multi_simulate([(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk])
-        out = []
-        for i, a in zip(chunk, alphas):
-            if isinstance(a, Exception):
-                out.append((i, a))
-                continue
-            try:
-                out.append((i, checked(brain, a)))
-            except AuthRequired:
-                raise
-            except Exception as e:
-                out.append((i, e))
-        return out
+        with ThreadPoolExecutor(max(1, workers)) as cx:
+            return list(zip(chunk, cx.map(check_one, alphas)))
 
     def sim_extra(jobs):
         alphas = brain.multi_simulate([(j["expr"], j["settings"]) for j in jobs])
-        out = []
-        for j, a in zip(jobs, alphas):
-            try:
-                out.append((j, a if isinstance(a, Exception) else checked(brain, a)))
-            except AuthRequired:
-                raise
-            except Exception as e:
-                out.append((j, e))
-        return out
+        with ThreadPoolExecutor(max(1, workers)) as cx:
+            return list(zip(jobs, cx.map(check_one, alphas)))
 
     stats = {"done": 0, "error": 0, "requeued": 0, "retry": 0, "pp_ok": 0, "reg_ok": 0, "market": 0}
     expired = False
