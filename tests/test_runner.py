@@ -266,3 +266,19 @@ def test_brain_pp_check_beats_grouping_under_a_submitted_alpha(monkeypatch):
     out = {p["alpha_id"]: p for p in picks.build(c, "A1")}
     assert "GLB" in out                                      # no longer folded under the submitted alpha
     assert "PEND" not in out and ["PEND", 0.51] in out["GLB"]["members"] + out["SUB"]["members"]
+
+
+def test_submit_refusal_names_the_checks_instead_of_raising(monkeypatch):
+    from ppminer import brain as br
+    monkeypatch.setattr(br.sandbox, "ON", False)
+
+    class R:
+        status_code = 403
+        text = '{"is": {"checks": [...]}}'
+        def json(self):
+            return {"is": {"checks": [{"name": "LOW_SHARPE", "result": "FAIL"}, {"name": "SELF_CORRELATION", "result": "PENDING"},
+                                      {"name": "LOW_FITNESS", "result": "PASS"}]}}
+    b = br.Brain()
+    monkeypatch.setattr(b.s, "post", lambda *a, **k: R())
+    res = b.submit("1YNk2wwX")
+    assert res["submitted"] is False and res["refused"] == ["LOW_SHARPE=FAIL", "SELF_CORRELATION=PENDING"]

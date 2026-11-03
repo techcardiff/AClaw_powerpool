@@ -148,7 +148,15 @@ class Brain:
             return {"http": r.status_code, "body": {}, "submitted": a.get("status") == "ACTIVE", "status": a.get("status"),
                     "stage": a.get("stage"), "tags": a.get("tags"), "dateSubmitted": a.get("dateSubmitted")}
         if r.status_code >= 400:
-            raise RuntimeError(f"submit refused: HTTP {r.status_code} {r.text[:300]}")
+            # a refusal lists BRAIN's checks: name the ones that are not PASS instead of raising,
+            # so one refused alpha doesn't end the whole auto-submit run (3 Nov: 1YNk2wwX did)
+            try:
+                checks = (r.json().get("is") or {}).get("checks") or []
+            except ValueError:
+                checks = []
+            refused = [f"{c.get('name')}={c.get('result')}" for c in checks
+                       if c.get("result") in ("FAIL", "PENDING", "ERROR")]
+            return {"http": r.status_code, "submitted": False, "refused": refused or [r.text[:300]]}
         deadline = time.time() + max_wait
         while time.time() < deadline:
             g = self.s.get(f"{BASE}/alphas/{alpha_id}/submit", timeout=60)

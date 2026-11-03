@@ -149,6 +149,11 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         if v != "pp_ok" or ppc != "PASS":
             _log(conn, account, q.today, "skip", aid, cid, f"fresh check: {v} {why} PPC={ppc}")
             continue
+        if (ch.get("SELF_CORRELATION") or {}).get("result") == "PENDING":
+            # all 23 accepted Power Pool submissions had self-correlation computed; BRAIN refused
+            # 1YNk2wwX (3 Nov) while it was PENDING. It is usually done within hours.
+            _log(conn, account, q.today, "skip", aid, cid, "self-correlation still computing at BRAIN; next run")
+            continue
         low = quality_gate(s["sharpe"], s["fitness"], s["turnover"], chk, quality, returns=s.get("returns"),
                            universe=universe, theme_match=bool(themes))
         if low:
