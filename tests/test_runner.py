@@ -246,3 +246,23 @@ def test_theme_share_skips_templates(monkeypatch):
     th = Theme(name="GLB/D1 Power Pool Nov`26", start=_dt.date(2026, 10, 26), end=_dt.date(2026, 11, 22), regions={"GLB"})
     lanes.lane_a(None, "A1", 10, theme=th)
     assert seen and all("template" not in st and "explore" in st for st in seen)
+
+
+def test_brain_pp_check_beats_grouping_under_a_submitted_alpha(monkeypatch):
+    from ppminer import picks
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    picks.ensure(c)
+    ok = json.dumps([{"name": "POWER_POOL_CORRELATION", "result": "PASS"}])
+    row = lambda aid, sh, fi, chk, rid: {"alpha_id": aid, "sharpe": sh, "fitness": fi, "turnover": 0.05, "single_dataset": 0,
+                                        "checks": chk, "id": rid, "candidate_id": rid}
+    sub = row("SUB", 1.37, 0.79, ok, 1)
+    glb = row("GLB", 1.2, 0.81, ok, 2)                      # BRAIN: Power Pool correlation PASS
+    pend = row("PEND", 1.19, 0.8, "[]", 3)                  # not checked yet
+    monkeypatch.setattr(picks, "passing", lambda conn, a: [sub, glb, pend])
+    monkeypatch.setattr(picks, "daily", lambda conn, aid: aid)
+    monkeypatch.setattr(picks, "corr", lambda a, b: 0.51)
+    c.execute("""insert into picks(alpha_id, resim_id, candidate_id, account, cluster, score, status)
+                 values ('SUB', 1, 1, 'A1', 1, 1.37, 'submitted')""")
+    out = {p["alpha_id"]: p for p in picks.build(c, "A1")}
+    assert "GLB" in out                                      # no longer folded under the submitted alpha
+    assert "PEND" not in out and ["PEND", 0.51] in out["GLB"]["members"] + out["SUB"]["members"]

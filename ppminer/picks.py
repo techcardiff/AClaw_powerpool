@@ -102,6 +102,11 @@ def passing(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
     return [r for r in rows if verdict(r["sharpe"], r["checks"])[0] == "pp_ok"]
 
 
+def _ppc_pass(r) -> bool:
+    return any(c.get("name") == "POWER_POOL_CORRELATION" and c.get("result") == "PASS"
+               for c in json.loads(r["checks"] or "[]") or [])
+
+
 def build(conn: sqlite3.Connection, account: str, threshold: float = 0.5) -> list[dict]:
     ensure(conn)
     rows = passing(conn, account)
@@ -115,7 +120,12 @@ def build(conn: sqlite3.Connection, account: str, threshold: float = 0.5) -> lis
     picks: list[dict] = []
     for r in rows:
         aid = r["alpha_id"]
-        best = max(((abs(corr(series[aid], series[p["alpha_id"]])), p) for p in picks),
+        # an already-submitted alpha is in the Power Pool, so BRAIN's own Power Pool correlation
+        # check already compares against it: when that check passes, our PnL estimate doesn't
+        # group the alpha under it (3 Nov: omEAbKjn, GLB, PASS at BRAIN, sat at 0.511 under
+        # HT52122's submitted USA alpha 9qEmL16r and never became a pick)
+        rivals = [p for p in picks if not (prior.get(p["alpha_id"]) == "submitted" and _ppc_pass(r))]
+        best = max(((abs(corr(series[aid], series[p["alpha_id"]])), p) for p in rivals),
                    key=lambda t: t[0], default=(0.0, None))
         if best[1] is not None and best[0] >= threshold and prior.get(aid) not in decided_rank:
             best[1]["members"].append([aid, round(best[0], 3)])
