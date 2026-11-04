@@ -328,3 +328,18 @@ def test_other_multisim_failures_are_not_split(monkeypatch):
     c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
     ids = _jobs(c, [f"rank(g{k})" for k in range(3)])
     assert runner.run_jobs(c, FakeBrain(), "A1", ids, workers=1, slots=1)["error"] == 3 and calls == [3]
+
+
+def test_cookie_sync_retries_a_closed_connection(monkeypatch, tmp_path):
+    from ppminer import cookies as ck
+    tries = []
+
+    class P:
+        def __init__(self, rc): self.returncode, self.stderr = rc, "scp: Connection closed"
+    monkeypatch.setenv("PP_COOKIE_SYNC", "host:/dir/")
+    monkeypatch.setattr(ck.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ck.subprocess, "run", lambda *a, **k: tries.append(1) or P(0 if len(tries) == 3 else 1))
+    assert ck.sync_cookie(str(tmp_path / "x.cookie")) is True and len(tries) == 3
+    tries.clear()
+    monkeypatch.setattr(ck.subprocess, "run", lambda *a, **k: tries.append(1) or P(1))
+    assert ck.sync_cookie(str(tmp_path / "x.cookie")) is False and len(tries) == 1 + len(ck.SYNC_DELAYS)

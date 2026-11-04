@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 
 import requests
 
@@ -49,19 +50,32 @@ def save_cookie(account: str, cookie: str) -> str:
     return path
 
 
-def sync_cookie(path: str) -> bool:
+SYNC_DELAYS = (5, 15, 30, 60)      # seconds before each retry
+
+
+def sync_cookie(path: str, delays=SYNC_DELAYS) -> bool:
     """Copy a saved cookie to the machine running the jobs (PP_COOKIE_SYNC, e.g.
     'qa-3080:/data/aclaw_powerpool/data/secrets/'). The Telegram broker runs on the
-    Mac because Telegram is blocked from the cluster; the jobs there need the cookie."""
+    workstation because Telegram is blocked from the cluster; the jobs there need the cookie.
+    The 3080's SSH sometimes closes connections: one failed copy on 4 Nov left HT52122 idle
+    with a fresh session saved here, so a failed copy is retried (about 2 minutes in all)."""
     target = os.getenv("PP_COOKIE_SYNC")
     if not target:
         return False
-    p = subprocess.run(["scp", "-q", "-p", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", path, target],
-                       capture_output=True, text=True, timeout=60)
-    if p.returncode != 0:
-        print(f"cookie sync to {target} failed: {p.stderr.strip()[:200]}")
-        return False
-    return True
+    err = ""
+    for wait in (0, *delays):
+        time.sleep(wait)
+        try:
+            p = subprocess.run(["scp", "-q", "-p", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", path, target],
+                               capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            err = "timed out"
+            continue
+        if p.returncode == 0:
+            return True
+        err = p.stderr.strip()[:200]
+    print(f"cookie sync to {target} failed after {1 + len(delays)} tries: {err}")
+    return False
 
 
 def load_cookie(account: str) -> str:
