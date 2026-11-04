@@ -57,14 +57,28 @@ class Brain:
         return r.status_code == 200
 
     # ── http helpers ────────────────────────────────────────────────────────
+    SERVER_RETRIES = (5, 10, 20, 40)     # seconds; BRAIN's 500s are usually momentary
+
     def _req(self, method: str, url: str, **kw) -> requests.Response:
+        """429: wait as BRAIN asks. 5xx and dropped connections: retry a few times (4 Nov: a 500
+        on /alphas/<id> ended HT52122's whole pass and its batch results were not saved)."""
+        server_waits = list(self.SERVER_RETRIES)
         for _ in range(30):
-            r = self.s.request(method, url, timeout=60, **kw)
+            try:
+                r = self.s.request(method, url, timeout=60, **kw)
+            except (requests.ConnectionError, requests.Timeout):
+                if not server_waits:
+                    raise
+                time.sleep(server_waits.pop(0))
+                continue
             if r.status_code == 429:
                 time.sleep(float(r.headers.get("Retry-After", 5)))
                 continue
             if r.status_code == 401:
                 raise AuthRequired("session expired")
+            if r.status_code in (500, 502, 503, 504) and server_waits:
+                time.sleep(server_waits.pop(0))
+                continue
             r.raise_for_status()
             return r
         raise RuntimeError(f"rate limited too long on {url}")

@@ -391,3 +391,25 @@ def test_scheduler_accounts_do_not_wait_for_each_other(monkeypatch, tmp_path):
     monkeypatch.setattr(sch, "log", lambda *a: None)
     sch.run(str(tmp_path / "pp.db"), str(tmp_path), hours=0.7 / 3600)
     assert passes["SLOW"] >= 1 and passes["FAST"] >= 5 * passes["SLOW"]
+
+
+def test_brain_retries_server_errors_then_gives_up(monkeypatch):
+    import requests
+    from ppminer import brain as br
+    monkeypatch.setattr(br.time, "sleep", lambda s: None)
+    codes = [500, 502, 200]
+
+    class R:
+        def __init__(self, code): self.status_code, self.headers = code, {}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code} Server Error")
+    b = br.Brain()
+    monkeypatch.setattr(b.s, "request", lambda *a, **k: R(codes.pop(0)))
+    assert b._req("GET", "https://x/alphas/A1").status_code == 200
+    monkeypatch.setattr(b.s, "request", lambda *a, **k: R(500))
+    try:
+        b._req("GET", "https://x/alphas/A1")
+        raise AssertionError("should give up")
+    except requests.HTTPError:
+        pass
