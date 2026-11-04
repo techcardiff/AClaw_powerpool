@@ -74,5 +74,6 @@ def check(expr: str, catalog: Catalog, region: str | None = None) -> PPCheck:
         r.problems.append("unknown fields: " + ",".join(unknown))
     if not fields and not unknown:
         r.problems.append("no data field")
-    r.problems += lint(expr, lambda n: (i := catalog.get(n, region)) is not None and i.type == "VECTOR")
+    r.problems += lint(expr, lambda n: (i := catalog.get(n, region)) is not None and i.type == "VECTOR",
+                       lambda n: None if (i := catalog.get(n, region)) is None else i.type == "GROUP")
     return r

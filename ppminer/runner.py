@@ -47,6 +47,7 @@ MAX_RETRIES = 3
 # (From Song's songjianalpha, commit 814bf67.)
 RESOURCE = re.compile(r"too much resource", re.I)
 SIBLING = re.compile(r"too much resource|CANCELLED", re.I)
+CANCELLED = re.compile(r"CANCELLED")
 # a batch whose sims nearly all failed this way means BRAIN is struggling: the account
 # waits instead of burning the retries of the next batch too
 PAUSE_SHARE = 0.9
@@ -203,6 +204,15 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
             # time each alpha gets its result or its own error message
             with ThreadPoolExecutor(max(1, workers)) as cx:
                 return list(cx.map(lambda it: brain.multi_simulate([it])[0], items))
+        cancelled = [k for k, a in enumerate(alphas) if isinstance(a, Exception) and CANCELLED.search(str(a))]
+        if len(items) > 1 and cancelled and len(cancelled) < len(items) \
+                and not any(isinstance(a, Exception) and RESOURCE.search(str(a)) for a in alphas):
+            # one alpha's error (e.g. a non-group as a group input) gets the rest CANCELLED; they
+            # went back to the queue for a later batch (2-3 Nov: 344). Resend them now, without it.
+            log(f"  BRAIN: {len(cancelled)} of {len(items)} cancelled next to a failing alpha; resending them")
+            for k, a in zip(cancelled, simulate([items[k] for k in cancelled], top=False)):
+                alphas[k] = a
+            return alphas
         if len(items) > 1 and any(isinstance(a, Exception) and RESOURCE.search(str(a)) for a in alphas):
             redo = [k for k, a in enumerate(alphas) if isinstance(a, Exception) and SIBLING.search(str(a))]
             half = (len(redo) + 1) // 2

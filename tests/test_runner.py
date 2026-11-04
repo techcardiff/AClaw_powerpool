@@ -343,3 +343,51 @@ def test_cookie_sync_retries_a_closed_connection(monkeypatch, tmp_path):
     tries.clear()
     monkeypatch.setattr(ck.subprocess, "run", lambda *a, **k: tries.append(1) or P(1))
     assert ck.sync_cookie(str(tmp_path / "x.cookie")) is False and len(tries) == 1 + len(ck.SYNC_DELAYS)
+
+
+def test_cancelled_neighbours_are_resent_in_the_same_batch(monkeypatch):
+    from ppminer import runner
+    bad = RuntimeError('simulation failed: ERROR Incompatible unit for input of "group_neutralize" at index 1')
+    calls = []
+
+    class FakeBrain:
+        def multi_simulate(self, items):
+            calls.append(len(items))
+            if any(e == "bad(x)" for e, _ in items):
+                return [bad if e == "bad(x)" else RuntimeError("simulation failed: CANCELLED ") for e, _ in items]
+            return [{"id": e} for e, _ in items]
+    monkeypatch.setattr(runner, "checked", lambda b, a: {"alpha_id": a["id"], "sharpe": 1.0, "fitness": 1.0, "turnover": 0.1,
+                                                          "returns": 0.1, "drawdown": 0.05, "checks": []})
+    monkeypatch.setattr(runner, "log", lambda *a: None)
+    monkeypatch.setattr(runner, "block", lambda *a: None)
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    ids = _jobs(c, ["rank(a)", "bad(x)", "rank(b)", "rank(c)"])
+    st = runner.run_jobs(c, FakeBrain(), "A1", ids, workers=2, slots=1)
+    assert (st["done"], st["error"], st["retry"]) == (3, 1, 0) and calls == [4, 3]
+
+
+def test_scheduler_accounts_do_not_wait_for_each_other(monkeypatch, tmp_path):
+    """3 Nov: a pass waited for both accounts, so HT52122 idled 43% of the time."""
+    import threading, time as _t
+    from ppminer import scheduler as sch
+    passes = {"FAST": 0, "SLOW": 0}
+    lock = threading.Lock()
+
+    def fake_cycle(conn, catalog, account, **kw):
+        _t.sleep(0.02 if account == "FAST" else 0.6)
+        with lock:
+            passes[account] += 1
+        return {"status": "ok", "sims": 1}
+    monkeypatch.setattr(sch, "cycle", fake_cycle)
+    monkeypatch.setattr(sch.autosubmit, "load_config", lambda: {"accounts": {"FAST": {"enabled": True}, "SLOW": {"enabled": True}}})
+    monkeypatch.setattr(sch.th, "current", lambda conn: None)
+    monkeypatch.setattr(sch, "_due", lambda conn, a, cfg: False)
+    monkeypatch.setattr(sch, "_brain", lambda a: None)
+    monkeypatch.setattr(sch, "sims_today", lambda c, a, mx=None: 0)
+    monkeypatch.setattr(sch.marketx, "clear_unfinished", lambda mx: 0)
+    monkeypatch.setattr(sch.marketx, "connect", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(sch, "Catalog", lambda d: type("C", (), {"add_account_fields": lambda self, c, a: None})())
+    monkeypatch.setattr(sch, "PASS_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(sch, "log", lambda *a: None)
+    sch.run(str(tmp_path / "pp.db"), str(tmp_path), hours=0.7 / 3600)
+    assert passes["SLOW"] >= 1 and passes["FAST"] >= 5 * passes["SLOW"]

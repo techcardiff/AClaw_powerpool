@@ -198,3 +198,17 @@ def test_sub_universe_fail_blocks_power_pool_and_gets_liquidity_fix():
     s = {"universe": "TOP2500", "neutralization": "SUBINDUSTRY", "decay": 0, "truncation": 0.08}
     out = pp_fixes("group_rank(ts_zscore(a / b, 252), bucket(rank(cap), range='0.2, 1, 0.2'))", s, sub_fail=True)
     assert [(w, st["neutralization"]) for w, _, st in out] == [("pp liquidity: neutralization INDUSTRY", "INDUSTRY")]
+
+
+def test_lint_flags_a_non_group_as_group_input():
+    from ppminer.expr import lint
+    types = {"close": False, "pv13_h_min2_sector": True}
+    is_group = types.get                                      # None = unknown field
+    flag = lambda e: [p for p in lint(e, lambda n: False, is_group) if "needs a group" in p]
+    assert flag("group_neutralize(rank(x), close)")           # BRAIN: Incompatible unit ... Unit[Group:1]
+    assert flag("group_rank(x, 5)")
+    assert not flag("group_neutralize(x, industry)")
+    assert not flag("group_rank(x, pv13_h_min2_sector)")
+    assert not flag("group_zscore(x, bucket(rank(cap), range='0.2, 1, 0.2'))")
+    assert not flag("group_rank(x, mystery_field)")           # unknown: leave it to BRAIN
+    assert flag("group_rank(x, rank(close))")                 # an expression is not a group

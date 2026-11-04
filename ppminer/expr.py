@@ -194,15 +194,31 @@ def analyze(expr: str) -> Shape:
 
 VECTOR_OPS = {"vec_sum", "vec_avg", "vec_max", "vec_min", "vec_count", "vec_stddev", "vec_range", "vec_ir"}
 PAIR_OPS = {"ts_corr", "ts_covariance", "ts_regression", "subtract", "divide"}
+# group operators whose second input must be a group: BRAIN rejects anything else ("Incompatible
+# unit ... at index 1, expected Unit[Group:1]"), and one such alpha gets the rest of its
+# multi-simulation CANCELLED (2-3 Nov: 64 unit errors, 344 cancellations)
+GROUP_ARG_OPS = {"group_neutralize", "group_rank", "group_zscore", "group_scale"}
+GROUP_MAKERS = {"bucket", "densify", "group_cartesian_product"}
 
 
-def lint(expr: str, is_vector) -> list[str]:
-    """Structural mistakes BRAIN rejects or that make the signal meaningless."""
+def lint(expr: str, is_vector, is_group=None) -> list[str]:
+    """Structural mistakes BRAIN rejects or that make the signal meaningless. `is_group(name)`
+    (True/False, None when unknown) checks the group input of group operators."""
     try:
         stmts = parse(expr)
     except ParseError as e:
         return [f"parse: {e}"]
     problems = []
+    variables = {t for t, _ in stmts if t}
+
+    def not_a_group(a: Node) -> bool:
+        if a.kind == "call":
+            return a.value not in GROUP_MAKERS
+        if a.kind == "name":
+            if a.value in GROUPING_FIELDS or a.value in variables or is_group is None:
+                return False
+            return is_group(a.value) is False
+        return a.kind == "num"
 
     def visit(n: Node, parent: Node | None):
         if n.kind == "name" and is_vector(n.value) and not (parent and parent.value in VECTOR_OPS):
@@ -211,6 +227,10 @@ def lint(expr: str, is_vector) -> list[str]:
             problems.append(f"quoted group {n.value} (use the bare name)")
         if n.kind == "num" and ("e" in n.value or "E" in n.value):
             problems.append(f"scientific notation {n.value} (BRAIN rejects it; write 0.00000001)")
+        if n.kind == "call" and n.value in GROUP_ARG_OPS:
+            pos = [a for a in n.args if a.kind != "kw"]
+            if len(pos) >= 2 and not_a_group(pos[1]):
+                problems.append(f"{n.value} needs a group as its second input, not {render(pos[1])}")
         if n.kind == "call" and n.value in PAIR_OPS:
             pos = [a for a in n.args if a.kind != "kw"]
             if len(pos) >= 2 and render(pos[0]) == render(pos[1]):

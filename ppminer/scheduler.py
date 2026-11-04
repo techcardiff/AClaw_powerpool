@@ -20,7 +20,6 @@ from __future__ import annotations
 import datetime as dt
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from . import autosubmit, lanes, marketx
 from . import theme as th
@@ -45,6 +44,8 @@ def _due(conn, account: str, cfg: dict) -> bool:
 
 
 MAX_SIMS_PER_DAY = 5000      # BRAIN's daily simulation limit per account
+IDLE = ("waiting_login", "empty", "paused", "capped")
+PASS_POLL_SECONDS = 15       # how often the main loop looks for an account whose pass ended
 
 
 def sims_today(conn, account: str, mx=None) -> int:
@@ -87,6 +88,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
     log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
     last_theme = None
     submitter: threading.Thread | None = None
+    miners: dict[str, threading.Thread] = {}
     while time.time() < t_end:
         cfg = autosubmit.load_config()
         accounts = [a for a, c in cfg.get("accounts", {}).items() if c.get("enabled")]
@@ -110,27 +112,25 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
             submitter = threading.Thread(target=_autosubmit, args=(db_path, catalog_dir, due), daemon=True,
                                          name="autosubmit")
             submitter.start()
-        for account in accounts:          # field catalogs: a few datasets per region per pass
-            b = _brain(account)
-            if b is None:
-                continue
-            for region in regions:
-                try:
-                    st = sync_step(conn, b, account, region)
-                    if st["done"]:
-                        log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
-                except Exception as e:
-                    log(f"[{account}] fields {region}: {e}")
         mxc = cfg.get("market_explore", {"enabled": True, "regions": ["EUR", "ASI", "GLB"]})
         mx_regions = mxc.get("regions") if mxc.get("enabled", True) else None
         if mx_regions and theme is not None:   # the theme region is Lane A's now, not exploration's
             mx_regions = [r for r in mx_regions if r not in theme.regions] or None
-        # both accounts mine at the same time, each with its own connection and catalog
         cap = int(cfg.get("max_sims_per_day", MAX_SIMS_PER_DAY))
 
         def mine(account):
+            """One pass for one account: field sync, then a mining cycle; an idle account
+            (no session, nothing to do, paused, capped) waits here before the next pass."""
             c2 = connect(db_path)
             try:
+                b = _brain(account)
+                for region in regions if b is not None else ():   # field catalogs: a few datasets per region
+                    try:
+                        st = sync_step(c2, b, account, region)
+                        if st["done"]:
+                            log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
+                    except Exception as e:
+                        log(f"[{account}] fields {region}: {e}")
                 mx = marketx.connect()
                 try:
                     left = cap - sims_today(c2, account, mx)
@@ -138,23 +138,29 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                     mx.close()
                 if left <= 0:
                     log(f"[{account}] daily simulation limit reached ({cap}) - waiting for midnight New York")
-                    return {"status": "capped", "sims": 0}
-                catalog = Catalog(catalog_dir)
-                catalog.add_account_fields(c2, account)
-                return cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
-                             regions=regions, others=accounts,
-                             c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
-                             slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
-                             market_regions=mx_regions,                         # template exploration in free slots
-                             theme=theme,                                       # Lane A theme share
-                             sims_left=left)                                    # daily simulation limit
+                    r = {"status": "capped", "sims": 0}
+                else:
+                    catalog = Catalog(catalog_dir)
+                    catalog.add_account_fields(c2, account)
+                    r = cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
+                              regions=regions, others=accounts,
+                              c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
+                              slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
+                              market_regions=mx_regions,                         # template exploration in free slots
+                              theme=theme,                                       # Lane A theme share
+                              sims_left=left)                                    # daily simulation limit
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")
-                return {"status": "error", "sims": 0}
+                r = {"status": "error", "sims": 0}
             finally:
                 c2.close()
+            if r["status"] in IDLE:
+                time.sleep(LOGIN_POLL_SECONDS)
 
-        with ThreadPoolExecutor(len(accounts)) as ex:
-            results = list(ex.map(mine, accounts))
-        if all(r["status"] in ("waiting_login", "empty", "paused", "capped") for r in results):
-            time.sleep(LOGIN_POLL_SECONDS)
+        # each account runs its own passes: on 3 Nov HT52122 spent 43% of its time waiting for
+        # YO50689's pass (Qwen ideas, checks) to end, because a pass waited for both accounts
+        for account in accounts:
+            if account not in miners or not miners[account].is_alive():
+                miners[account] = threading.Thread(target=mine, args=(account,), daemon=True, name=f"mine-{account}")
+                miners[account].start()
+        time.sleep(PASS_POLL_SECONDS)
