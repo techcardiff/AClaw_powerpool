@@ -41,6 +41,12 @@ CHECK_WAIT_SECONDS = 180
 # up to MAX_RETRIES times; an alpha error (invalid field, wrong inputs...) stays an error.
 TRANSIENT = re.compile(r"Please try again|CANCELLED|rate limited too long")
 MAX_RETRIES = 3
+# "Your simulation probably took too much resource": one heavy alpha makes BRAIN stop the
+# whole multi-simulation and every child reports it (2 Nov: 25 such errors, 10 at once).
+# Those children are resent in halves until the heavy one is alone; only it stays an error.
+# (From Song's songjianalpha, commit 814bf67.)
+RESOURCE = re.compile(r"too much resource", re.I)
+SIBLING = re.compile(r"too much resource|CANCELLED", re.I)
 # a batch whose sims nearly all failed this way means BRAIN is struggling: the account
 # waits instead of burning the retries of the next batch too
 PAUSE_SHARE = 0.9
@@ -180,15 +186,36 @@ def run_jobs(conn, brain: Brain, account: str, ids: list[int], workers: int, slo
         except Exception as e:
             return e
 
-    def sim_chunk(chunk):
-        items = [(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk]
-        alphas = brain.multi_simulate(items)
+    def simulate(items, top=True):
+        """One entry per item: the alpha or its Exception. Whole-chunk failures BRAIN gives no
+        alpha-specific reason for are split up so the innocent alphas still get results."""
+        try:
+            alphas = brain.multi_simulate(items)
+        except AuthRequired:
+            raise
+        except Exception as e:
+            if top and (len(items) == 1 or not RESOURCE.search(str(e))):
+                raise
+            alphas = [e] * len(items)
         if len(items) > 1 and all(_bare_fail(a) for a in alphas):
             # BRAIN sometimes fails a whole multi-simulation with a bare FAIL and no reason
             # (23 of 24 such chunks, 31 Oct - 2 Nov, had no real error in them); one at a
             # time each alpha gets its result or its own error message
             with ThreadPoolExecutor(max(1, workers)) as cx:
-                alphas = list(cx.map(lambda it: brain.multi_simulate([it])[0], items))
+                return list(cx.map(lambda it: brain.multi_simulate([it])[0], items))
+        if len(items) > 1 and any(isinstance(a, Exception) and RESOURCE.search(str(a)) for a in alphas):
+            redo = [k for k, a in enumerate(alphas) if isinstance(a, Exception) and SIBLING.search(str(a))]
+            half = (len(redo) + 1) // 2
+            log(f"  BRAIN: multi-simulation of {len(items)} too heavy; resending {len(redo)} in groups of "
+                f"{half} and {len(redo) - half}")
+            for part in (redo[:half], redo[half:]):
+                if part:
+                    for k, a in zip(part, simulate([items[k] for k in part], top=False)):
+                        alphas[k] = a
+        return alphas
+
+    def sim_chunk(chunk):
+        alphas = simulate([(rows[i]["expr"], json.loads(rows[i]["settings"])) for i in chunk])
         with ThreadPoolExecutor(max(1, workers)) as cx:
             return list(zip(chunk, cx.map(check_one, alphas)))
 

@@ -282,3 +282,49 @@ def test_submit_refusal_names_the_checks_instead_of_raising(monkeypatch):
     monkeypatch.setattr(b.s, "post", lambda *a, **k: R())
     res = b.submit("1YNk2wwX")
     assert res["submitted"] is False and res["refused"] == ["LOW_SHARPE=FAIL", "SELF_CORRELATION=PENDING"]
+
+
+def _jobs(c, exprs, region="GLB"):
+    from ppminer import db, lanes
+    c.executescript(db.SCHEMA); lanes.migrate(c)
+    st = json.dumps({"region": region, "universe": "TOP3000", "delay": 1})
+    return [c.execute("insert into resims(candidate_id, account, expr, settings, status) values (?,?,?,?,'queued')",
+                      (k, "A1", e, st)).lastrowid for k, e in enumerate(exprs)]
+
+
+def test_heavy_multisim_is_split_until_the_heavy_alpha_is_alone(monkeypatch):
+    """Ported from Song's songjianalpha (814bf67)."""
+    from ppminer import runner
+    heavy = RuntimeError("simulation failed: ERROR Your simulation probably took too much resource.")
+    calls = []
+
+    class FakeBrain:
+        def multi_simulate(self, items):
+            calls.append(len(items))
+            if len(items) > 1 and any(e == "heavy(x)" for e, _ in items):
+                return [heavy] * len(items)
+            return [heavy if e == "heavy(x)" else {"id": e} for e, _ in items]
+    monkeypatch.setattr(runner, "checked", lambda b, a: {"alpha_id": a["id"], "sharpe": 1.2, "fitness": 1.0, "turnover": 0.1,
+                                                          "returns": 0.1, "drawdown": 0.05, "checks": []})
+    monkeypatch.setattr(runner, "log", lambda *a: None)
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    ids = _jobs(c, [f"rank(f{i})" for i in range(9)] + ["heavy(x)"])
+    st = runner.run_jobs(c, FakeBrain(), "A1", ids, workers=2, slots=1)
+    assert (st["done"], st["error"]) == (9, 1)
+    assert calls[0] == 10 and len(calls) <= 1 + 2 * 4                # halving: at most ~2 calls per level
+    assert [tuple(r) for r in c.execute("select expr from resims where status='error'")] == [("heavy(x)",)]
+
+
+def test_other_multisim_failures_are_not_split(monkeypatch):
+    from ppminer import runner
+    calls = []
+
+    class FakeBrain:
+        def multi_simulate(self, items):
+            calls.append(len(items))
+            return [RuntimeError("simulation failed: ERROR Invalid data field foo")] * len(items)
+    monkeypatch.setattr(runner, "log", lambda *a: None)
+    monkeypatch.setattr(runner, "block", lambda *a: None)
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    ids = _jobs(c, [f"rank(g{k})" for k in range(3)])
+    assert runner.run_jobs(c, FakeBrain(), "A1", ids, workers=1, slots=1)["error"] == 3 and calls == [3]
