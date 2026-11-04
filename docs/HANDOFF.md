@@ -104,7 +104,7 @@ descriptions, and the second-pass audit of every description before it goes on B
 | Part | Where | Notes |
 |---|---|---|
 | Website | **https://alpha.hokin.cloud** | nginx on the VPS, HTTPS + password; ask the supervisor for the login. Everyone with the password can queue simulations and approve picks, so don't share it further. |
-| Miner, scheduler, dashboard, `data/pp.db`, cookies | **3080**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux `ppminer` (windows above). `scripts/start_3080.sh` is safe to re-run and re-adds any missing window. Restart one service: `tmux kill-window -t ppminer:<name>`, then the script; never `pkill -f`. **No @reboot entry is installed**: after a 3080 restart, run the script by hand. Logs: `data/logs/{daily,web,web_tunnel,qwen_tunnel}.log`. |
+| Miner, scheduler, dashboard, `data/pp.db`, cookies | **3080**, `/data/aclaw_powerpool`, Linux user `alpha` | tmux `ppminer` (windows above). `scripts/start_3080.sh` is safe to re-run and re-adds any missing window. Restart one service: `tmux kill-window -t ppminer:<name>`, then the script; never `pkill -f`. An `@reboot` cron entry (installed 4 Nov by `scripts/install_3080_cron.sh`, after a crash on 3 Nov left everything down for 7 hours) runs the script at boot; its output goes to `data/logs/start.log`. Song's sandbox is not in it: start it with `scripts/sandbox.sh start`. Logs: `data/logs/{daily,web,web_tunnel,qwen_tunnel}.log`. |
 | Song's sandbox | **3080**, `/data/aclaw_song` (branch `song`), user `alpha`, port 5071 | tmux `song`; own code and database copy, simulates on HT52122, can never submit (`PP_SANDBOX=1`). Shown at https://alpha.hokin.cloud/song/ through the live dashboard. `scripts/sandbox.sh start|stop|refresh-db`; guide: `docs/SANDBOX_SONG.md`. |
 | Qwen3.8-27B (vLLM) | **A6000**, port 8060 | Owned by **another lab user**; if it stops, Qwen steps fail until it's back. Simulations keep working. |
 | Telegram login broker | **Lab workstation** (`~/aclaw_powerpool`, `scripts/start_ws_broker.sh`), since 26 Oct | Telegram is blocked on the cluster and the workstation's network, so the workstation goes out through a **Tailscale exit node**. Logs every message it sends (`data/logs/telegram.log` there). After a reboot, start it by hand. **Run only one broker** (`start_mac_broker.sh` is a fallback). |
@@ -276,8 +276,9 @@ All code is in `ppminer/`. `python -m ppminer --help` lists the commands.
 - **Field sync:** USA complete; EUR and ASI syncing a few datasets per pass inside the scheduler.
 - **Website:** https://alpha.hokin.cloud since 26 Oct (VPS nginx + password + reverse tunnel).
 - **Broker:** on the lab workstation (moved from the Mac on 26 Oct).
-- No @reboot entries anywhere: after a restart of the 3080 run `scripts/start_3080.sh`, after a
-  restart of the workstation run `scripts/start_ws_broker.sh`.
+- The 3080 restarts its services at boot (`@reboot` cron, since 4 Nov). The workstation has no
+  @reboot entry: after a restart of the workstation run `scripts/start_ws_broker.sh` (broker and
+  theme fetch).
 - No notifications from the 3080 (Telegram is blocked there): check the website's auto-submit log.
 
 Questions: ask your supervisor, who has the history of this project.
