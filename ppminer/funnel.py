@@ -96,18 +96,24 @@ def pp_fixes(expr: str, settings: dict, sub_fail: bool = False) -> list[tuple[st
     return [(f"{why}: neutralization INDUSTRY", expr, dict(settings, neutralization="INDUSTRY"))]
 
 
-def pp_parents(conn: sqlite3.Connection, account: str) -> list[sqlite3.Row]:
+def pp_parents(conn: sqlite3.Connection, account: str, theme=None) -> list[sqlite3.Row]:
     """Non-USA results that pass the Power Pool rules but miss the quality bar only on
-    Sharpe, fitness or turnover; best Sharpe x fitness first."""
+    Sharpe, fitness or turnover; best Sharpe x fitness first. With `theme`: only results in its
+    region(s) that match it, judged against the theme bar (THEME_BAR)."""
+    from . import theme as th
     rows = conn.execute("""select r.*, c.region as cregion, c.id as cid, c.fields from resims r join candidates c
                            on c.id = r.candidate_id where r.account=? and r.status='done' and c.region<>'USA'
                              and r.sharpe >= ? order by r.sharpe * r.fitness desc limit 200""",
                         (account, PP_MIN_SHARPE)).fetchall()
     out = []
     for r in rows:
+        st = json.loads(r["settings"] or "{}")
+        if theme is not None and not (r["cregion"] in theme.regions
+                                      and th.theme_names(r["checks"], theme, r["cregion"], st.get("delay"))):
+            continue
         v, why = verdict(r["sharpe"], r["checks"])
         gaps = quality_gate(r["sharpe"], r["fitness"], r["turnover"], r["checks"], returns=r["returns"],
-                            universe=json.loads(r["settings"] or "{}").get("universe"))
+                            universe=st.get("universe"), theme_match=theme is not None)
         near_bar = gaps and all(g.startswith(PP_GAPS) and "implausible" not in g for g in gaps)
         if ((v == "pp_ok" and near_bar) or (v == "not_pp" and why == [SUB_FAIL] and not gaps)) \
                 and _depth(conn, r["id"]) < MAX_DEPTH:
@@ -155,13 +161,13 @@ def _pp_fixes(p) -> list[tuple[str, str, dict]]:
 
 
 def next_jobs(conn: sqlite3.Connection, account: str, room: int, budget=None,
-              power_pool: bool = False) -> list[tuple[int, str, str, dict, int]]:
+              power_pool: bool = False, theme=None) -> list[tuple[int, str, str, dict, int]]:
     """Up to `room` (candidate_id, purpose, expr, settings, parent_resim_id) jobs from the best parent
     that still has untried fixes. `budget` (lanes.Budget) caps parents on used-up fields.
     power_pool: fix Power Pool near misses outside USA (pp_parents) instead of regular ones."""
     seen = tried(conn, account)
     total = room
-    for p in (pp_parents if power_pool else parents)(conn, account):
+    for p in (pp_parents(conn, account, theme) if power_pool else parents(conn, account)):
         room = min(total, budget.room(p)) if budget is not None else total
         if room <= 0:
             continue

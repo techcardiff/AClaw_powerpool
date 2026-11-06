@@ -124,8 +124,13 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     room = size - len([r for r in rows_a])
     # Lane C part 1: the tiered funnel fixes the failing check of the best near miss, and
     # smooths the best Power Pool result outside USA that sits below the quality bar
-    for pp in (True, False):
-        for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room), budget, power_pool=pp):
+    # The theme's own near misses go first: from 3 to 6 Nov the funnel ran 1 GLB fix, as the best
+    # near miss of any region (nearly always USA/EUR) took the slot every batch
+    for pp, th_ in ((True, theme), (True, None), (False, None)):
+        if th_ is not None and not th_.regions:
+            continue
+        for cid, purpose, expr, st, parent in funnel.next_jobs(conn, account, min(3, room), budget, power_pool=pp,
+                                                               theme=th_):
             ids.append(_enqueue(conn, account, "C", purpose, cid, expr, st, parent))
             room -= 1
     # Lane C part 2: harvested regular-grade alphas (not already in this batch via Lane A)
@@ -394,13 +399,49 @@ def explore_regions(conn, catalog, account: str, regions: list[str], per_region:
     return added
 
 
+def proven_theme_datasets(conn, account: str, theme, region: str) -> list[sqlite3.Row]:
+    """The account's datasets (account_datasets rows) in `region` that already gave genuine theme
+    matches (Power Pool rules passed, theme rule matched), most matches first; among equals, the
+    one with fewest untested explore ideas first, so new ideas spread over them."""
+    from . import theme as th
+    hits: dict[str, int] = {}
+    for checks, settings, sharpe, datasets in conn.execute(
+            """select r.checks, r.settings, r.sharpe, c.datasets from resims r join candidates c on c.id = r.candidate_id
+               where r.account=? and r.status='done' and c.region=? and r.sharpe >= 1""", (account, region)):
+        if verdict(sharpe, checks)[0] == "pp_ok" and th.theme_names(checks, theme, region, json.loads(settings).get("delay")):
+            for d in json.loads(datasets or "[]"):
+                hits[d] = hits.get(d, 0) + 1
+    if not hits:
+        return []
+    queued = {d: n for d, n in conn.execute(
+        """select json_each.value, count(*) from candidates c, json_each(c.datasets) where c.status='explore' and c.region=?
+             and not exists (select 1 from resims r where r.candidate_id=c.id and r.account=?) group by 1""", (region, account))}
+    rows = conn.execute(f"select * from account_datasets where account=? and region=? and dataset in ({','.join('?' * len(hits))})",
+                        (account, region, *hits)).fetchall()
+    return sorted(rows, key=lambda r: (-hits[r["dataset"]], queued.get(r["dataset"], 0)))
+
+
 def theme_ideas(conn, catalog, account: str, theme, others: list[str] = (), min_queue: int = 20,
-                per_pass: int = 4) -> int:
-    """Keep enough usable Qwen ideas in the theme's region(s) for Lane A's theme share
-    (about half a batch). Templates used to fill it: 1,582 GLB ones to 3 Nov gave no
-    theme match, Qwen's GLB ideas 18 of 868."""
-    return explore_regions(conn, catalog, account, sorted(theme.regions), per_region=per_pass, min_queue=min_queue,
-                           theme=theme, others=others)
+                per_pass: int = 4, proven: int = 2) -> int:
+    """Keep enough usable Qwen ideas in the theme's region(s) for Lane A's theme share (about half
+    a batch): first on datasets that already gave this account theme matches, then on new ones.
+    Templates used to fill it (1,582 GLB ones to 3 Nov, no theme match); from 3 to 6 Nov only new
+    datasets were explored, and 420 such GLB ideas gave 1 Power Pool pass, against 23 of 1,059
+    before, when proven datasets like analyst_revision_horizons (omEAbKjn) were still in play."""
+    from .explore import explore, fresh_datasets, save as save_explore
+    added = 0
+    usable = lanes.usable_ideas(conn, account, others)
+    for region in sorted(theme.regions):
+        if usable.get(region, 0) >= min_queue:
+            continue
+        picks = proven_theme_datasets(conn, account, theme, region)[:proven]
+        picks += fresh_datasets(conn, account, region)[:max(0, per_pass - len(picks))]
+        for ds in picks:
+            try:
+                added += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds, region, theme=theme), region)
+            except Exception as e:
+                log(f"  explore {region}/{ds['dataset']} failed: {e}")
+    return added
 
 
 def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,

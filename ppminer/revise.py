@@ -51,14 +51,16 @@ def theme_gap(row, theme) -> float | None:
 
 def todo(conn: sqlite3.Connection, account: str, theme=None) -> list[sqlite3.Row]:
     """Simulated explore ideas that missed the bar and have not been revised yet. With a theme
-    that sets sub-region Sharpe rules, template alphas in its region qualify too, and those
-    closest to the theme's bar go first."""
+    that sets sub-region Sharpe rules, template, funnel and manual alphas in its region qualify
+    too (6 Nov: GLB theme near misses from the funnel were never revised), and those closest
+    to the theme's bar go first."""
     regions = sorted(theme.regions) if theme is not None and theme.sub_sharpe else []
     rows = conn.execute(f"""
         select r.id as resim_id, r.sharpe as new_sharpe, r.fitness as new_fitness, r.turnover as new_turnover,
                r.checks, c.* from resims r join candidates c on c.id = r.candidate_id
         where r.account=? and r.status='done' and coalesce(c.depth,0) < ?
-          and (c.status='explore' or (c.status='template' and c.region in ({','.join('?' * len(regions)) or "''"})))
+          and (c.status='explore' or (c.status in ('template', 'funnel', 'manual')
+                                      and c.region in ({','.join('?' * len(regions)) or "''"})))
           and not exists (select 1 from candidates k where k.parent_id = c.id)
           and not exists (select 1 from llm_jobs j where j.candidate_id = c.id and j.kind = 'revise')
         order by abs(r.sharpe) desc""", (account, MAX_DEPTH, *regions)).fetchall()

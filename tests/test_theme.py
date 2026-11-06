@@ -171,3 +171,45 @@ def test_theme_bar_lowers_the_quality_bar_for_theme_matches_only():
     assert quality_gate(1.2, 0.81, 0.02, "[]", theme_match=True) == []
     assert quality_gate(1.17, 0.91, 0.02, "[]", theme_match=True) != []  # sharpe still under 1.2
     assert quality_gate(1.25, 0.9, 0.02, "[]", universe="TOP1000", theme_match=True) == []   # never raises a bar
+
+
+def _glb_db():
+    import json as _j, sqlite3 as _s
+    from ppminer import db, lanes
+    c = _s.connect(":memory:"); c.row_factory = _s.Row
+    c.executescript(db.SCHEMA); lanes.migrate(c)
+    c.execute("""create table if not exists account_datasets (account text, region text, delay int, dataset text, name text,
+                 category text, field_count int, value_score real, pyramid_multiplier real, alpha_count int)""")
+    for ds in ("good_ds", "new_ds"):
+        c.execute("insert into account_datasets(account, region, delay, dataset, name, category) values ('A1','GLB',1,?,?, 'analyst')", (ds, ds))
+    from ppminer.theme import parse_theme
+    th = parse_theme("GLB/D1 Power Pool Nov`26", "2026-10-26", "2026-11-22", "region=GLB & delay=1 & AMER Sharpe > 1")
+    ok = lambda amer: _j.dumps([{"name": "POWER_POOL_CORRELATION", "result": "PASS"},
+                                {"name": "LOW_GLB_AMER_SHARPE", "result": "PASS", "value": amer}])
+    st = _j.dumps({"region": "GLB", "delay": 1, "universe": "TOP3000", "neutralization": "SUBINDUSTRY"})
+
+    def add(cid, ds, status, sharpe, fitness, amer):
+        c.execute("""insert into candidates(id, key, expr, region, delay, datasets, fields, categories, status, reasoning)
+                     values (?,?,?,'GLB',1,?,'["f"]','["analyst"]',?, 'idea')""", (cid, f"k{cid}", f"rank(f{cid})", _j.dumps([ds]), status))
+        c.execute("""insert into resims(candidate_id, account, expr, settings, status, sharpe, fitness, turnover, returns, checks, alpha_id)
+                     values (?,'A1',?,?,'done',?,?,0.1,0.05,?,?)""", (cid, f"rank(f{cid})", st, sharpe, fitness, ok(amer), f"AL{cid}"))
+    return c, th, add
+
+
+def test_proven_theme_datasets_rank_by_genuine_theme_matches():
+    from ppminer.runner import proven_theme_datasets
+    c, th, add = _glb_db()
+    add(1, "good_ds", "explore", 1.2, 0.81, 1.27)          # Power Pool pass + AMER > 1: a genuine match
+    add(2, "new_ds", "explore", 1.3, 0.9, 0.6)             # AMER below 1: no theme match
+    assert [r["dataset"] for r in proven_theme_datasets(c, "A1", th, "GLB")] == ["good_ds"]
+
+
+def test_theme_funnel_and_revisions_take_glb_theme_near_misses():
+    from ppminer import funnel, revise
+    c, th, add = _glb_db()
+    add(1, "good_ds", "funnel", 1.14, 0.76, 1.18)          # WjObpwVO-like: theme match, under the theme bar
+    add(2, "good_ds", "funnel", 1.25, 0.85, 1.3)           # already clears the theme bar
+    add(3, "good_ds", "explore", 1.3, 0.6, 0.7)            # no theme match
+    assert [r["alpha_id"] for r in funnel.pp_parents(c, "A1", th)] == ["AL1"]
+    todo = [r["id"] for r in revise.todo(c, "A1", th)]
+    assert 1 in todo and 2 in todo                          # funnel results in the theme region get revised too
