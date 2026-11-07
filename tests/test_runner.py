@@ -413,3 +413,59 @@ def test_brain_retries_server_errors_then_gives_up(monkeypatch):
         raise AssertionError("should give up")
     except requests.HTTPError:
         pass
+
+
+def _cycle_env(monkeypatch, tmp_path, ids_seq, prep_seconds):
+    """cycle() with BRAIN, Qwen and the batch faked: records when each part ran."""
+    import threading, time as _t
+    from ppminer.db import connect
+    conn = connect(str(tmp_path / "pp.db"))
+    events, batches = [], list(ids_seq)
+
+    def fake_prepare(c, catalog, account, regions, others, theme):
+        assert threading.current_thread() is not threading.main_thread()
+        events.append(("qwen start", _t.time()))
+        _t.sleep(prep_seconds)
+        events.append(("qwen end", _t.time()))
+
+    def fake_run_jobs(conn, brain, account, ids, workers, slots, extra, mx):
+        events.append(("sim start", _t.time()))
+        _t.sleep(0.3)
+        events.append(("sim end", _t.time()))
+        return {"done": len(ids), "error": 0, "retry": 0, "expired": False}
+    monkeypatch.setattr(runner, "_brain", lambda a: object())
+    monkeypatch.setattr(runner, "paused_until", lambda conn, a: 0)
+    monkeypatch.setattr(runner.lanes, "set_state", lambda conn, **kw: None)
+    monkeypatch.setattr(runner, "prepare", fake_prepare)
+    monkeypatch.setattr(runner, "build_batch", lambda *a, **k: batches.pop(0))
+    monkeypatch.setattr(runner, "_lane_counts", lambda conn, ids: {})
+    monkeypatch.setattr(runner, "run_jobs", fake_run_jobs)
+    monkeypatch.setattr(runner, "after_batch", lambda *a: 0)
+    monkeypatch.setattr(runner, "log", lambda *a: None)
+    return conn, events
+
+
+def test_qwen_writes_next_ideas_while_the_batch_simulates(monkeypatch, tmp_path):
+    """7 Nov: Qwen took 5-7 min before every ~25-30 min batch, with nothing simulating."""
+    conn, events = _cycle_env(monkeypatch, tmp_path, [[1, 2]], prep_seconds=0.3)
+    r = runner.cycle(conn, None, "HT52122")
+    t = dict(events)
+    assert r["status"] == "ok"
+    assert t["sim start"] < t["qwen end"]          # simulating did not wait for Qwen
+    assert t["qwen end"] <= t["sim end"] + 0.25     # and Qwen was done by the end of the pass
+
+
+def test_empty_queue_waits_for_qwen_then_builds_again(monkeypatch, tmp_path):
+    conn, events = _cycle_env(monkeypatch, tmp_path, [[], [7]], prep_seconds=0.1)
+    r = runner.cycle(conn, None, "HT52122")
+    t = dict(events)
+    assert r["status"] == "ok" and t["qwen end"] <= t["sim start"]
+
+
+def test_qwen_thread_is_joined_when_the_pass_fails(monkeypatch, tmp_path):
+    import pytest
+    conn, events = _cycle_env(monkeypatch, tmp_path, [[1]], prep_seconds=0.2)
+    monkeypatch.setattr(runner, "run_jobs", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        runner.cycle(conn, None, "HT52122")
+    assert ("qwen end" in dict(events))

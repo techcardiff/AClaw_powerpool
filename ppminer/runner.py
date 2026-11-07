@@ -3,7 +3,8 @@
   python -m ppminer run --account HT52122 --hours 8 --max-sims 300
 
 Each cycle:
-  1. Qwen revises explore ideas that showed some signal (revise.py)
+  1. Qwen revises explore ideas that showed some signal (revise.py) and tops up explore and
+     theme ideas, in a background thread while steps 2-3 run (its ideas feed the next pass)
   2. build a batch: Lane A (PP inventory) + a share of Lane C (regular alphas,
      incl. settings sweeps of near misses); Lane C fills whatever Lane A leaves
   3. simulate the batch in parallel on BRAIN
@@ -18,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -332,7 +334,7 @@ def do_revisions(conn, catalog, account: str, limit: int, workers: int = 4, them
 
 
 def _ro(conn):
-    path = conn.execute("pragma database_list").fetchone()[2]
+    path = _db_path(conn)
     # handed to a worker thread (one connection per job), so not tied to the creating thread
     c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
     c.row_factory = sqlite3.Row
@@ -444,16 +446,12 @@ def theme_ideas(conn, catalog, account: str, theme, others: list[str] = (), min_
     return added
 
 
-def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
-          regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9,
-          market_regions: list[str] | None = None, theme=None) -> dict:
-    """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
-    brain = _brain(account)
-    if brain is None:
-        lanes.set_state(conn, status="waiting_login", account=account)
-        return {"status": "waiting_login", "sims": 0}
-    if paused_until(conn, account) > time.time():
-        return {"status": "paused", "sims": 0}
+def _db_path(conn) -> str:
+    return conn.execute("pragma database_list").fetchone()[2]
+
+
+def prepare(conn, catalog, account: str, regions, others, theme) -> None:
+    """Qwen's part of a pass: revisions, explore ideas, market copies, theme ideas."""
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
@@ -471,7 +469,48 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
         n = theme_ideas(conn, catalog, account, theme, others)
         if n:
             log(f"[{account}] theme {theme.name}: {n} new Qwen ideas")
+
+
+def _prepare_safe(path: str, catalog, account: str, regions, others, theme) -> None:
+    """prepare() in its own thread, on its own connection (sqlite connections stay in their thread)."""
+    from .db import connect
+    c = connect(path)
+    try:
+        prepare(c, catalog, account, regions, others, theme)
+    except Exception as e:
+        log(f"[{account}] Qwen ideas: {e}")
+    finally:
+        c.close()
+
+
+def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
+          regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9,
+          market_regions: list[str] | None = None, theme=None) -> dict:
+    """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
+    brain = _brain(account)
+    if brain is None:
+        lanes.set_state(conn, status="waiting_login", account=account)
+        return {"status": "waiting_login", "sims": 0}
+    if paused_until(conn, account) > time.time():
+        return {"status": "paused", "sims": 0}
+    # Qwen tops up ideas for the NEXT pass while this one simulates: run first, it took
+    # 5-7 min of every ~33 min pass (7 Nov) with nothing simulating
+    prep = threading.Thread(target=_prepare_safe, name=f"qwen-{account}", daemon=True,
+                            args=(_db_path(conn), catalog, account, regions, others, theme))
+    prep.start()
+    try:
+        return _pass(conn, catalog, brain, account, prep, batch=batch, workers=workers, c_share=c_share,
+                     slots=slots, others=others, sims_left=sims_left, market_regions=market_regions, theme=theme)
+    finally:
+        prep.join()          # never two Qwen threads for one account, even after an error
+
+
+def _pass(conn, catalog, brain, account, prep, *, batch, workers, c_share, slots, others, sims_left,
+          market_regions, theme) -> dict:
     ids = build_batch(conn, account, min(batch, sims_left), c_share, others, theme)
+    if not ids:                  # nothing queued yet (first pass, or Qwen fell behind): wait for it
+        prep.join()
+        ids = build_batch(conn, account, min(batch, sims_left), c_share, others, theme)
     if not ids:
         return {"status": "empty", "sims": 0}
     lanes.set_state(conn, status="simulating", account=account, batch=len(ids))
@@ -486,6 +525,8 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
         if extra:
             log(f"[{account}] market exploration: {len(extra)} template alphas in {extra[0]['settings']['region']}")
     st = run_jobs(conn, brain, account, ids, workers, slots, extra, mx)
+    if prep.is_alive():
+        log(f"[{account}] batch simulated; waiting for Qwen to finish the next pass's ideas")
     if st["expired"]:
         return {"status": "waiting_login", "sims": st["done"] + st["error"]}
     n_picks = after_batch(conn, catalog, brain, account)
