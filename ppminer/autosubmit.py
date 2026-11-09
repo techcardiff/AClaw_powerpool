@@ -10,6 +10,7 @@ Per enabled account (config: data/autosubmit.json, see autosubmit.example.json):
        - a fresh BRAIN check: Power Pool verdict pp_ok, POWER_POOL_CORRELATION = PASS,
          theme match once the account is past week 6, daily submission limit not reached
   4. submit, confirm (ACTIVE + PowerPoolSelected), record it
+  5. regular alphas from the reviewed queue, if accounts.<id>.regular is enabled (regular.py)
 Fewer than the quota is fine: nothing weak is submitted to fill a slot.
 dry_run: everything except setting the description and submitting; the theme is
 judged by its rule then, since BRAIN can't confirm it without the description.
@@ -24,7 +25,7 @@ import os
 import sqlite3
 import time
 
-from . import cookies as ck, lanes, ppcorr
+from . import cookies as ck, lanes, ppcorr, regular
 from .brain import Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
@@ -207,4 +208,11 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
             catalog.add_account_fields(conn, account)
             out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
                                        quality=quality_bar(cfg, acfg))
+            rcfg = acfg.get("regular") or {}
+            if rcfg.get("enabled") and out[account].get("status") != "waiting_login":
+                # after Power Pool, from the reviewed queue only (regular.py); dry run unless the owner turns it off
+                day = ny_now().date()
+                out[account]["regular"] = regular.run_account(
+                    conn, account, dry_run=force_dry_run or rcfg.get("dry_run", True), per_day=int(rcfg.get("per_day", 2)),
+                    log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
     return out

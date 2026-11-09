@@ -225,6 +225,16 @@ def cmd_cookie(args):
             print(f"{os.path.basename(path)}: saved as {name} (user {who['user_id']}, {_hours(who['expiry_seconds'])})")
 
 
+def cmd_regular_queue(args):
+    from . import regular
+    conn = dbm.connect(DB_PATH)
+    regular.migrate(conn)
+    if args.action == "add":
+        print("added", regular.add(conn, json.load(open(args.file))))
+    for r in conn.execute("select account, alpha_id, status, sharpe, fitness, detail from regular_queue order by account, fitness desc"):
+        print(" ", *tuple(r))
+
+
 def cmd_themes(args):
     from .themes_fetch import FetchError, run
     try:
@@ -513,6 +523,10 @@ def main(argv=None):
     sp.set_defaults(fn=lambda a: __import__("ppminer.runner", fromlist=["run"]).run(
         DB_PATH, CATALOG_DIR, a.account, a.hours, a.max_sims, a.batch, a.workers, a.c_share,
         a.regions.split(","), [o for o in a.others.split(",") if o]))
+    sp = sub.add_parser("regular-queue", help="add a reviewed JSON list to the regular-submission queue, or list it")
+    sp.add_argument("action", choices=["add", "list"])
+    sp.add_argument("file", nargs="?")
+    sp.set_defaults(fn=cmd_regular_queue)
     sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
     sp.add_argument("--dry-run", action="store_true", help="never submit, whatever the config says")

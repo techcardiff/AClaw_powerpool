@@ -10,11 +10,13 @@
   "accounts": {
     "HT52122": {
       "enabled": true,
-      "dry_run": true
+      "dry_run": true,
+      "regular": {"enabled": true, "dry_run": true, "per_day": 2}
     },
     "YO50689": {
       "enabled": true,
-      "dry_run": true
+      "dry_run": true,
+      "regular": {"enabled": true, "dry_run": true, "per_day": 2}
     }
   },
   "quality": {
