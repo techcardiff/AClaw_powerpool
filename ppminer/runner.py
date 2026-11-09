@@ -458,7 +458,15 @@ def prepare(conn, catalog, account: str, regions, others, theme) -> None:
     """Qwen's part of a pass: revisions, explore ideas, market copies, theme ideas."""
     from .llm import up
     if not up():
-        log(f"[{account}] Qwen server not answering: no new ideas this pass (templates fill the batch)")
+        # 8-9 Nov: Qwen down and nothing left to simulate; fixed shapes on untried fields instead
+        from . import gen
+        try:
+            n = gen.top_up(conn, catalog, account, regions, others, theme)
+        except Exception as e:
+            n = {}
+            log(f"[{account}] shape ideas: {e}")
+        log(f"[{account}] Qwen server not answering; shape ideas: "
+            + (", ".join(f"{k} {v}" for k, v in n.items()) or "none needed"))
         return
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
