@@ -18,7 +18,7 @@ import re
 from .catalog import Catalog
 from .describe import MIN_LEN, SCHEMA as DESC_SCHEMA, SYSTEM as DESC_SYSTEM, compose
 from .expr import analyze
-from .llm import chat_json
+from .llm import LLMError, chat_json, up as llm_up
 
 SECTIONS = ("Idea:", "Rationale for data used:", "Rationale for operators used:")
 _WINDOW = re.compile(r"\b(\d{1,3})[- ](?:day|days|trading[- ]day|d)\b", re.I)
@@ -132,7 +132,19 @@ Only mention window lengths that appear in the expression. Return JSON with idea
 
 def verified_description(expr: str, draft: str | None, catalog: Catalog, region: str,
                          settings: dict | None = None) -> tuple[str | None, list[str]]:
-    """Return (text, []) when a description passes, else (None, issues)."""
+    """Return (text, []) when a description passes, else (None, issues). With Qwen down,
+    a factual description built from the expression itself (fallback_description)."""
+    try:
+        return _verified(expr, draft, catalog, region, settings)
+    except LLMError:
+        text = fallback_description(expr, catalog, region, settings)
+        issues = rule_issues(expr, text)
+        return (None, issues) if issues else (text, [])
+
+
+def _verified(expr, draft, catalog, region, settings):
+    if not llm_up():
+        raise LLMError("Qwen server not answering")
     text = draft or rewrite(expr, [], catalog, region, settings)
     ok, issues = verify(expr, text, catalog, region, settings)
     if ok:
@@ -145,3 +157,69 @@ def verified_description(expr: str, draft: str | None, catalog: Catalog, region:
             return text, []
         all_issues += [f"rewrite {attempt}: {i}" for i in new]
     return None, all_issues
+
+
+# ── without Qwen ─────────────────────────────────────────────────────────────
+# Plain statements of what each operator computes, with no window lengths (rule_issues
+# rejects any window not in the expression) and no claims about returns.
+OP_PLAIN = {
+    "rank": "rank converts values into cross-sectional percentiles across the universe each day",
+    "group_rank": "group_rank ranks values within each group (e.g. industry) so stocks are compared with peers",
+    "zscore": "zscore standardises values across stocks on each day",
+    "group_zscore": "group_zscore standardises values within each group",
+    "group_neutralize": "group_neutralize subtracts the group average so only within-group differences remain",
+    "scale": "scale rescales the vector so absolute weights sum to one",
+    "ts_rank": "ts_rank compares today's value with the stock's own recent history",
+    "ts_zscore": "ts_zscore measures how far today's value sits from the stock's own recent mean, in standard deviations",
+    "ts_mean": "ts_mean averages the input over a trailing window to smooth noise",
+    "ts_sum": "ts_sum adds up the input over a trailing window",
+    "ts_delta": "ts_delta takes the change of the input over a trailing window",
+    "ts_std_dev": "ts_std_dev measures the variability of the input over a trailing window",
+    "ts_decay_linear": "ts_decay_linear takes a linearly weighted average that favours recent days",
+    "ts_backfill": "ts_backfill carries the last available value forward over missing days for sparse data",
+    "ts_corr": "ts_corr measures the trailing correlation of its two inputs",
+    "ts_regression": "ts_regression fits a trailing regression of one input on the other",
+    "ts_av_diff": "ts_av_diff subtracts the trailing average from today's value",
+    "ts_arg_max": "ts_arg_max gives how many days ago the trailing maximum occurred",
+    "ts_arg_min": "ts_arg_min gives how many days ago the trailing minimum occurred",
+    "vec_avg": "vec_avg averages the entries of a vector field into one value per stock",
+    "vec_sum": "vec_sum adds up the entries of a vector field into one value per stock",
+    "winsorize": "winsorize clips extreme values to limit the effect of outliers",
+    "sign": "sign keeps only the direction of the input",
+    "abs": "abs takes the absolute value",
+    "log": "log compresses large values",
+    "signed_power": "signed_power raises the magnitude to a power while keeping the sign",
+    "reverse": "reverse flips the sign of the input",
+    "trade_when": "trade_when only updates the position when its condition holds and otherwise keeps the previous one",
+    "add": "add sums its inputs", "subtract": "subtract takes the difference of its inputs",
+    "multiply": "multiply combines its inputs as a product", "divide": "divide forms a ratio of its inputs",
+    "max": "max keeps the larger input", "min": "min keeps the smaller input",
+}
+
+
+def fallback_description(expr: str, catalog: Catalog, region: str, settings: dict | None = None) -> str:
+    """A description that only states what the expression and the catalog say: which fields
+    it uses (with BRAIN's own field descriptions), what each operator does, and the direction.
+    Used when Qwen is unavailable, so a passing alpha is not held back."""
+    s = analyze(expr)
+    names = sorted(s.names) if s.ok else []
+    infos = [(f, catalog.get(f, region)) for f in names if catalog.get(f, region)] or [(f, None) for f in names]
+    fields = [f for f, _ in infos]
+    inverted = expr.lstrip().startswith("-") or (s.ok and "reverse" in s.ops)
+    direction = ("It is long stocks where the signal is low and short where it is high (the signal is inverted)."
+                 if inverted else "It is long stocks where the signal is high and short where it is low.")
+    neut = (settings or {}).get("neutralization")
+    idea = (f"A cross-sectional signal built from {', '.join(fields) or 'the fields below'}"
+            f", comparing stocks on this information. "
+            f"{direction}" + (f" Positions are neutralized by {neut.lower()}." if neut and neut != "NONE" else ""))
+    def desc(f, i):
+        d = " ".join((i.description or "").split()).rstrip(".") if i else ""
+        # a catalog text naming another field or a window not in the expression would fail rule_issues
+        bad = d and any(not x.startswith(("shorter", "missing")) for x in rule_issues(expr, d))
+        return f"{f}: {d}." if d and not bad else f"{f} (a {i.category} field)." if i else f"{f}."
+    data = " ".join(desc(f, i) for f, i in infos) or "See the expression."
+    ops = sorted(set(s.ops)) if s.ok else []
+    plain = [OP_PLAIN[o] for o in ops if o in OP_PLAIN]
+    other = [o for o in ops if o not in OP_PLAIN]
+    rat_ops = ("; ".join(plain) + "." if plain else "") + (f" Also uses {', '.join(other)}." if other else "")
+    return compose({"idea": idea, "rationale_data": data, "rationale_ops": rat_ops.strip() or "Arithmetic on the fields."})

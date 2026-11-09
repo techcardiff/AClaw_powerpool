@@ -46,6 +46,21 @@ def chat(messages: list[dict], *, schema: dict | None = None, think: bool = Fals
     raise LLMError(f"LLM call failed after {retries} tries: {last}")
 
 
+_UP: dict = {"at": 0.0, "ok": True}
+
+
+def up(cache_seconds: float = 120) -> bool:
+    """Is the Qwen server answering? Checked at most every cache_seconds (Qwen was down
+    from 8 Nov 15:25 and every pass spent minutes on failing calls)."""
+    if time.time() - _UP["at"] > cache_seconds:
+        try:
+            ok = requests.get(f"{LLM_URL}/models", timeout=10).ok
+        except requests.RequestException:
+            ok = False
+        _UP.update(at=time.time(), ok=ok)
+    return _UP["ok"]
+
+
 def chat_json(messages: list[dict], schema: dict, **kw) -> dict:
     text = chat(messages, schema=schema, **kw)
     m = re.search(r"\{.*\}", text, re.S)

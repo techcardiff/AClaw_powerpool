@@ -118,7 +118,10 @@ def build_batch(conn, account: str, size: int, c_share: float, others: list[str]
     if size <= 0:
         return ids
     n_c = max(1, round(size * c_share))
-    budget = lanes.Budget(conn)                 # template / used-up-field caps for the whole batch
+    from .llm import up
+    # template / used-up-field caps for the whole batch; with Qwen down there are no new
+    # ideas, so templates may fill it (8-9 Nov: batches shrank to 1-4 alphas, then stopped)
+    budget = lanes.Budget(conn) if up() else lanes.Budget(conn, templates=size)
     rows_a = lanes.lane_a(conn, account, size - n_c, others, theme, budget)
     for r in rows_a:
         purpose = PURPOSE.get(r["status"], "harvest")
@@ -373,7 +376,8 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     rows = passing(conn, account)
     fetch_pnl(conn, brain, account, [r["alpha_id"] for r in rows])
     picks = build(conn, account)
-    for p in picks:
+    from .llm import up
+    for p in picks if up() else []:          # drafts need Qwen; auto-submit has a fallback
         cid = p["row"]["candidate_id"]
         if conn.execute("select 1 from descriptions where candidate_id=?", (cid,)).fetchone():
             continue
@@ -452,6 +456,10 @@ def _db_path(conn) -> str:
 
 def prepare(conn, catalog, account: str, regions, others, theme) -> None:
     """Qwen's part of a pass: revisions, explore ideas, market copies, theme ideas."""
+    from .llm import up
+    if not up():
+        log(f"[{account}] Qwen server not answering: no new ideas this pass (templates fill the batch)")
+        return
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")

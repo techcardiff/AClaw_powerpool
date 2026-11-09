@@ -213,3 +213,43 @@ def test_theme_funnel_and_revisions_take_glb_theme_near_misses():
     assert [r["alpha_id"] for r in funnel.pp_parents(c, "A1", th)] == ["AL1"]
     todo = [r["id"] for r in revise.todo(c, "A1", th)]
     assert 1 in todo and 2 in todo                          # funnel results in the theme region get revised too
+
+
+def test_fallback_description_states_only_what_the_expression_says(monkeypatch):
+    """8-9 Nov: Qwen was down and auto-submit stopped at the description step."""
+    from types import SimpleNamespace as NS
+    from ppminer import descheck
+    cat = NS(get=lambda f, r: {
+        "anl_rev_eps_up": NS(category="Analyst", dataset="analyst_revision_horizons", type="MATRIX",
+                             description="Number of upward EPS revisions"),
+        "close_vol_ratio": NS(category="Price Volume", dataset="pv1", type="MATRIX",
+                              description="Ratio over the 20-day window of close_price_raw to volume")}.get(f))
+    monkeypatch.setattr(descheck, "chat_json", lambda *a, **k: (_ for _ in ()).throw(descheck.LLMError("down")))
+    monkeypatch.setattr(descheck, "llm_up", lambda: False)
+    expr = "-group_rank(ts_mean(anl_rev_eps_up, 60) / close_vol_ratio, industry)"
+    text, issues = descheck.verified_description(expr, None, cat, "GLB", {"neutralization": "INDUSTRY"})
+    assert issues == [] and text
+    assert "inverted" in text and "anl_rev_eps_up: Number of upward EPS revisions." in text
+    assert "20-day" not in text and "close_vol_ratio (a Price Volume field)" in text   # catalog text with a foreign window dropped
+    assert "group_rank" in text and "ts_mean" in text and descheck.rule_issues(expr, text) == []
+
+
+def test_qwen_down_lets_templates_fill_the_batch(monkeypatch):
+    from ppminer import lanes, runner
+    seen = {}
+    real = lanes.Budget
+
+    def spy(conn, templates=lanes.MAX_TEMPLATES, **kw):
+        seen["templates"] = templates
+        return real(None, templates=templates, **kw)
+    monkeypatch.setattr(runner.lanes, "Budget", spy)
+    monkeypatch.setattr("ppminer.llm.up", lambda: False)
+    monkeypatch.setattr(runner.lanes, "lane_a", lambda *a, **k: [])
+    monkeypatch.setattr(runner.lanes, "lane_c", lambda *a, **k: [])
+    import ppminer.funnel as fn
+    monkeypatch.setattr(fn, "next_jobs", lambda *a, **k: [])
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.execute("create table resims(id, account, status, lane)")
+    runner.build_batch(conn, "HT52122", 40, 0.375)
+    assert seen["templates"] == 40
