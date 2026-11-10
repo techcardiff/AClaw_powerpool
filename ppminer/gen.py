@@ -40,6 +40,8 @@ SPARSE_BELOW = 0.8          # wrap in ts_backfill below this coverage
 EXPAND_AT = 0.5
 SEEDS_PER_PASS = 30
 MIN_QUEUE = 25
+# beside Qwen (about 25-35 Qwen ideas a pass, batches of 40): expansions first, a few seeds
+SEEDS_ALONGSIDE, THEME_SEEDS_ALONGSIDE, EXPAND_ALONGSIDE = 3, 6, 2
 # identifiers and labels, not quantities (premap_instrument_to_ticker_map_twn, benchmark_currency_code_2)
 NOT_A_QUANTITY = re.compile(r"(^|_)(code|codes|map|ticker|tickers|id|ids|isin|cusip|sedol|currency|name|names|"
                             r"date|dates|flag|type|types|country|exchange|sector|industry|gics|identifier)(_|$|\d)")
@@ -161,14 +163,27 @@ def expand(conn, catalog, account: str, region: str, limit: int = 10) -> int:
 
 
 def top_up(conn, catalog, account: str, regions, others=(), theme=None, min_queue: int = MIN_QUEUE) -> dict:
-    """Expand promising seeds, then add seeds where Lane A has fewer than min_queue usable ideas.
-    The theme's regions go first."""
+    """Qwen down: expand promising seeds, then add seeds where Lane A has fewer than
+    min_queue usable ideas. The theme's regions go first."""
+    return _run(conn, catalog, account, regions, others, theme, min_queue=min_queue)
+
+
+def alongside(conn, catalog, account: str, regions, others=(), theme=None) -> dict:
+    """Qwen up: a smaller steady share beside Qwen's ideas. From 8 to 10 Nov, 1,485 shape
+    ideas passed the Power Pool rules 2.6% of the time, against 3.1% for Qwen's explore ideas."""
+    return _run(conn, catalog, account, regions, others, theme, min_queue=None,
+                n_seeds=SEEDS_ALONGSIDE, theme_seeds=THEME_SEEDS_ALONGSIDE, expand_limit=EXPAND_ALONGSIDE)
+
+
+def _run(conn, catalog, account, regions, others, theme, *, min_queue, n_seeds=SEEDS_PER_PASS,
+         theme_seeds=SEEDS_PER_PASS, expand_limit=10) -> dict:
     first = sorted(theme.regions) if theme is not None and theme.regions else []
     out = {}
     for region in list(dict.fromkeys(first + list(regions))):
-        n = expand(conn, catalog, account, region)
-        if lanes.usable_ideas(conn, account, others).get(region, 0) < min_queue:
-            n += seeds(conn, catalog, account, region, others, theme if region in first else None)
+        n = expand(conn, catalog, account, region, limit=expand_limit)
+        if min_queue is None or lanes.usable_ideas(conn, account, others).get(region, 0) < min_queue:
+            n += seeds(conn, catalog, account, region, others, theme if region in first else None,
+                       n=theme_seeds if region in first else n_seeds)
         if n:
             out[region] = n
     return out

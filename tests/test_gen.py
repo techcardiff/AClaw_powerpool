@@ -76,3 +76,15 @@ def test_identifier_names():
         assert gen.NOT_A_QUANTITY.search(f)
     for f in ("revenue_y2_consensus_value", "min_loan_rate_p5_d1", "holder_account_total"):
         assert not gen.NOT_A_QUANTITY.search(f)
+
+
+def test_alongside_qwen_seeds_a_few_regardless_of_queue(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gen, "expand", lambda c, cat, a, r, limit=10: calls.append(("expand", r, limit)) or 0)
+    monkeypatch.setattr(gen, "seeds", lambda c, cat, a, r, o, t, n=30: calls.append(("seeds", r, n)) or n)
+    monkeypatch.setattr(gen.lanes, "usable_ideas", lambda *a, **k: {"GLB": 999, "USA": 999})
+    theme = NS(regions={"GLB"})
+    out = gen.alongside(None, None, "A", ["USA", "GLB"], [], theme)
+    assert out == {"GLB": gen.THEME_SEEDS_ALONGSIDE, "USA": gen.SEEDS_ALONGSIDE}
+    assert calls[0] == ("expand", "GLB", gen.EXPAND_ALONGSIDE)
+    assert gen.top_up(None, None, "A", ["USA", "GLB"], [], theme) == {}      # Qwen down: queue is full enough

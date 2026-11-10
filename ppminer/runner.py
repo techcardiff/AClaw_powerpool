@@ -455,7 +455,8 @@ def _db_path(conn) -> str:
 
 
 def prepare(conn, catalog, account: str, regions, others, theme) -> None:
-    """Qwen's part of a pass: revisions, explore ideas, market copies, theme ideas."""
+    """The idea part of a pass: shape ideas (gen.py), then Qwen's revisions, explore ideas,
+    market copies and theme ideas; shape ideas only, more of them, while Qwen is down."""
     from .llm import up
     if not up():
         # 8-9 Nov: Qwen down and nothing left to simulate; fixed shapes on untried fields instead
@@ -468,6 +469,13 @@ def prepare(conn, catalog, account: str, regions, others, theme) -> None:
         log(f"[{account}] Qwen server not answering; shape ideas: "
             + (", ".join(f"{k} {v}" for k, v in n.items()) or "none needed"))
         return
+    from . import gen
+    try:                         # shape ideas beside Qwen's (no Qwen time; 2.6% vs 3.1% pass rate, 8-10 Nov)
+        n = gen.alongside(conn, catalog, account, regions, others, theme)
+        if n:
+            log(f"[{account}] shape ideas beside Qwen: " + ", ".join(f"{k} {v}" for k, v in n.items()))
+    except Exception as e:
+        log(f"[{account}] shape ideas: {e}")
     added = do_revisions(conn, catalog, account, limit=8, theme=theme)
     if added:
         log(f"[{account}] Qwen revisions: {added} new explore variants")
