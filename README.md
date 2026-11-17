@@ -60,6 +60,19 @@ candidate must be re-simulated before submission.
 - One job per account at a time: several writers on one `pp.db` lock each other out.
 - The Mac copy `data/pp.db.moved-to-3080` is the pre-move snapshot; don't run jobs against it.
 
+### Stand-in submitter on the workstation (temporary, while the cluster is down)
+
+When the 3080 can't be reached, the lab workstation (`amaz@100.119.181.15` over Tailscale,
+`~/aclaw_powerpool`) can run the same scheduler without Qwen:
+- `scripts/start_ws_standby.sh` refuses to start while the 3080's SSH port answers. It imports the
+  strongest unsubmitted alphas of each account from BRAIN (`python -m ppminer import-brain`, at most
+  40 each), then starts `ppminer daily` and a guard. Its own `data/pp.db` starts empty; the 3080's is untouched.
+- Log in with `/login` in Telegram as usual: the broker saves the cookie on the workstation.
+- **Switching back:** the guard checks every 5 minutes and runs `scripts/stop_ws_standby.sh` as soon
+  as the 3080 answers (it starts ppminer at boot). You can also run that script by hand. Then log in
+  again from Telegram so the broker copies a fresh cookie to the 3080. What the stand-in submitted is
+  on BRAIN, and the 3080 reads it back before its own next submission (quota, correlation).
+
 ## Setup
 
 ```bash

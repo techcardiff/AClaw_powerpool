@@ -235,6 +235,16 @@ def cmd_regular_queue(args):
         print(" ", *tuple(r))
 
 
+def cmd_import_brain(args):
+    from . import brainimport
+    from .catalog import Catalog
+    conn = dbm.connect(DB_PATH)
+    catalog = Catalog(CATALOG_DIR)
+    for account in args.account or ["HT52122", "YO50689"]:
+        catalog.add_account_fields(conn, account)
+        print(account, brainimport.run(conn, catalog, account, per_account=args.per_account))
+
+
 def cmd_themes(args):
     from .themes_fetch import FetchError, run
     try:
@@ -527,6 +537,10 @@ def main(argv=None):
     sp.add_argument("action", choices=["add", "list"])
     sp.add_argument("file", nargs="?")
     sp.set_defaults(fn=cmd_regular_queue)
+    sp = sub.add_parser("import-brain", help="stand-in submitter: unsubmitted BRAIN alphas -> candidates (never submits)")
+    sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
+    sp.add_argument("--per-account", type=int, default=40)
+    sp.set_defaults(fn=cmd_import_brain)
     sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
     sp.add_argument("--dry-run", action="store_true", help="never submit, whatever the config says")
