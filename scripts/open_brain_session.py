@@ -3,6 +3,7 @@
 
     python3 open_brain_session.py              # fetch, verify, open Chrome, clean up on exit
     python3 open_brain_session.py --dry-run    # fetch + verify only, no browser
+    python3 open_brain_session.py --workstation  # read it from the lab workstation (cluster down)
 
 How it works
   1. Reads the live session cookie from the 3080 over SSH (the Telegram broker keeps
@@ -52,12 +53,18 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def fetch_token(host: str, account: str) -> str:
-    """Read <account>.cookie on the 3080 and return only the `t` session value."""
-    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host,
-                        f"cat {REMOTE_DIR}/{account}.cookie"], capture_output=True, text=True, timeout=60)
+# While the cluster is down the stand-in on the lab workstation holds the fresh session.
+WORKSTATION = ("amaz@100.119.181.15", "~/aclaw_powerpool/data/secrets", "~/.ssh/id_techcardiff")
+
+
+def fetch_token(host: str, account: str, remote_dir: str = REMOTE_DIR, key: str | None = None) -> str:
+    """Read <account>.cookie on the session host and return only the `t` session value."""
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+    if key:
+        cmd += ["-i", os.path.expanduser(key)]
+    r = subprocess.run(cmd + [host, f"cat {remote_dir}/{account}.cookie"], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        die(f"could not read the session from {host} (SSH access to the 3080 is required)")
+        die(f"could not read the session from {host} (SSH access to it is required)")
     for part in r.stdout.split(";"):
         k, _, v = part.strip().partition("=")
         if k == "t" and v:
@@ -176,11 +183,17 @@ def remove_dir(path: str) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="qa-3080", help="SSH host holding the session (default qa-3080)")
+    ap.add_argument("--workstation", action="store_true",
+                    help="read the session from the lab workstation (stand-in while the cluster is down)")
     ap.add_argument("--dry-run", action="store_true", help="fetch and verify only; do not open Chrome")
     ap.add_argument("--keep-profile", action="store_true", help="do not delete the temporary profile on exit")
     args = ap.parse_args()
 
-    token = fetch_token(args.host, ALLOWED_ACCOUNT)
+    if args.workstation:
+        host, remote_dir, key = WORKSTATION
+        token = fetch_token(host, ALLOWED_ACCOUNT, remote_dir, key)
+    else:
+        token = fetch_token(args.host, ALLOWED_ACCOUNT)
     hours = verify(token, ALLOWED_ACCOUNT)
     print(f"session for {ALLOWED_ACCOUNT} is live ({hours:.1f}h left)")
     if args.dry_run:
