@@ -69,3 +69,8 @@ def test_per_account_cap():
     br = FakeBrain([alpha(f"B{i}", f"rank(ts_mean(close, {10 + i}))") for i in range(5)])
     c = _conn()
     assert brainimport.run(c, _cat(), "YO50689", per_account=2, brain=br)["added"] == 2
+
+
+def test_fresh_database_has_no_field_table_yet():
+    c = _conn()
+    assert Catalog("/nonexistent").add_account_fields(c, "HT52122") == 0

@@ -59,6 +59,8 @@ class Catalog:
     def add_account_fields(self, conn, account: str) -> int:
         """Add fields synced for an account (pp.db account_fields); they cover datasets
         the old competition catalog never had."""
+        from .fields import ensure          # a fresh pp.db (workstation stand-in) has no table yet
+        ensure(conn)
         n = 0
         for fid, region, ds, cat, ftype, desc in conn.execute(
                 "select field, region, dataset, category, type, description from account_fields where account=?",
