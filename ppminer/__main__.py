@@ -249,6 +249,23 @@ def cmd_import_brain(args):
                 regular_too=args.regular, per_regular=args.per_regular, any_shape=args.any_shape))
 
 
+def cmd_super(args):
+    from . import cookies as ck, superalpha
+    from .brain import Brain
+    conn = dbm.connect(DB_PATH)
+    superalpha.migrate(conn)
+    if args.action == "list":
+        for r in conn.execute("""select account, alpha_id, status, sharpe, fitness, turnover, selection, combo, detail
+                                 from super_alphas order by created_at desc limit 30"""):
+            print(dict(r))
+        return
+    b = Brain.from_cookie(ck.load_cookie(args.account))
+    if not b.is_authenticated():
+        sys.exit(f"{args.account}: not logged in")
+    st = superalpha.settings(region=args.region, universe=args.universe, limit=args.limit)
+    print("simulated", superalpha.simulate_grid(conn, b, args.account, st))
+
+
 def cmd_themes(args):
     from .themes_fetch import FetchError, run
     try:
@@ -552,6 +569,13 @@ def main(argv=None):
     sp.add_argument("--any-shape", action="store_true",
                     help="with --regular: queue Power Pool shapes too, for slots the Power Pool quota leaves free")
     sp.set_defaults(fn=cmd_import_brain)
+    sp = sub.add_parser("super", help="super alphas: simulate the selection x combo grid (never submits), or list them")
+    sp.add_argument("action", choices=["sim", "list"])
+    sp.add_argument("--account", default="HT52122")
+    sp.add_argument("--region", default="USA")
+    sp.add_argument("--universe", default="TOP3000")
+    sp.add_argument("--limit", type=int, default=20, help="selection limit (10-1000)")
+    sp.set_defaults(fn=cmd_super)
     sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
     sp.add_argument("--dry-run", action="store_true", help="never submit, whatever the config says")

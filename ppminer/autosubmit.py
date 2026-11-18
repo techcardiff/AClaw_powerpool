@@ -25,7 +25,7 @@ import os
 import sqlite3
 import time
 
-from . import cookies as ck, lanes, ppcorr, regular
+from . import superalpha, cookies as ck, lanes, ppcorr, regular
 from .brain import Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
@@ -239,4 +239,14 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
                     conn, account, dry_run=force_dry_run or rcfg.get("dry_run", True), per_day=int(rcfg.get("per_day", 2)),
                     scopes=target_scopes(acfg),
                     log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+            scfg = acfg.get("super") or {}
+            if scfg.get("enabled") and out[account].get("status") != "waiting_login":
+                # one super alpha a day (BRAIN's SUPER_SUBMISSION), last: Power Pool and regular go first
+                day = ny_now().date()
+                try:
+                    out[account]["super"] = superalpha.run_account(
+                        conn, account, dry_run=force_dry_run or scfg.get("dry_run", True),
+                        log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+                except Exception as e:
+                    out[account]["super"] = {"status": "error", "error": str(e)[:200]}
     return out

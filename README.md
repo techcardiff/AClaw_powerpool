@@ -84,6 +84,15 @@ the nearest scopes before a cutoff, per account in `data/autosubmit.json`:
   account's own unsubmitted alphas of a scope in as candidates, and queues those that pass the regular
   bar but aren't Power Pool shapes for the regular lane.
 
+### Super alphas (HT52122)
+
+`ppminer/superalpha.py`: one super alpha a day (BRAIN's SUPER_SUBMISSION limit), combining the
+account's own submitted alphas. It runs inside autosubmit after Power Pool and regular, with
+`accounts.<id>.super = {"enabled": true, "dry_run": true}`. It simulates a small grid of selection
+(low self-correlation, turnover cap) x combo (`combo_a`) variants, writes both descriptions from the
+expressions, and submits the best one whose fresh check passes, correlation included.
+`python -m ppminer super sim --account HT52122` simulates the grid by hand; `super list` shows them.
+
 ## Setup
 
 ```bash
