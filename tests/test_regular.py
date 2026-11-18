@@ -62,3 +62,23 @@ def test_dry_run_never_submits(monkeypatch):
     b = FakeBrain({"good": chk(), "corr": chk(), "next": chk()})
     r = regular.run_account(c, "A", dry_run=True, per_day=2, brain=b)
     assert b.submitted == [] and r["submitted"] == 2
+
+
+def test_target_scopes_first_and_already_submitted_skipped(monkeypatch):
+    from ppminer import quota
+    monkeypatch.setattr(regular, "ny_now", lambda: quota.dt.datetime(2026, 11, 9, 12, tzinfo=quota.NY))
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    c.execute("create table account_submitted (account, alpha_id, expr, canon, stems, tags, sharpe, date_submitted)")
+    regular.add(c, [{"account": "A", "alpha_id": a, "fitness": f, "settings": {"region": r, "delay": d}}
+                    for a, f, r, d in (("usa1", 3.0, "USA", 1), ("eur", 1.2, "EUR", 1), ("taken", 2.5, "USA", 0),
+                                       ("usa0", 1.1, "USA", 0))])
+
+    class B(FakeBrain):
+        def alpha(self, aid):
+            return {**super().alpha(aid), "status": "ACTIVE" if aid == "taken" else "UNSUBMITTED"}
+
+    b = B({a: chk() for a in ("usa1", "eur", "taken", "usa0")})
+    regular.run_account(c, "A", dry_run=False, per_day=4, brain=b, scopes=["EUR/1", "USA/0"])
+    assert b.submitted == ["eur", "usa0", "usa1"]          # target scopes first, then the rest; 4 - 0 = room 4
+    st = dict(c.execute("select alpha_id, status from regular_queue").fetchall())
+    assert st["taken"] == "gone"

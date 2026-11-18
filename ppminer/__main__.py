@@ -246,7 +246,7 @@ def cmd_import_brain(args):
         for scope in args.scope or [None]:
             print(account, scope or "all scopes", brainimport.run(
                 conn, catalog, account, per_account=args.per_account, bar=bar, scope=scope,
-                regular_too=args.regular, per_regular=args.per_regular))
+                regular_too=args.regular, per_regular=args.per_regular, any_shape=args.any_shape))
 
 
 def cmd_themes(args):
@@ -549,6 +549,8 @@ def main(argv=None):
     sp.add_argument("--regular", action="store_true",
                     help="also queue non-Power-Pool-shape alphas at the regular bar for the regular lane")
     sp.add_argument("--per-regular", type=int, default=10, help="regular-queue additions per account (per scope)")
+    sp.add_argument("--any-shape", action="store_true",
+                    help="with --regular: queue Power Pool shapes too, for slots the Power Pool quota leaves free")
     sp.set_defaults(fn=cmd_import_brain)
     sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")

@@ -73,8 +73,13 @@ def today_counts(conn: sqlite3.Connection, account: str, today=None) -> tuple[in
     return total, regular
 
 
+def _scope(settings_json: str | None) -> str:
+    st = json.loads(settings_json or "{}")
+    return f"{(st.get('region') or 'USA').upper()}/{int(st.get('delay', 1))}"
+
+
 def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: int = 2, brain: Brain | None = None,
-                log=None) -> dict:
+                log=None, scopes: list[str] | None = None) -> dict:
     from .runner import checked
     migrate(conn)
     log = log or (lambda *a, **k: None)
@@ -88,12 +93,23 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
         log("regular_quota", detail=f"{regular}/{per_day} regular, {total}/{DAILY_SUBMISSION_LIMIT} in all today")
         return {"status": "quota_full", "submitted": 0}
     submitted = 0
-    for q in conn.execute("""select * from regular_queue where account=? and status='queued'
-                             order by fitness desc""", (account,)).fetchall():
+    queue = conn.execute("""select * from regular_queue where account=? and status='queued'
+                            order by fitness desc""", (account,)).fetchall()
+    if scopes:          # Osmosis target scopes first (autosubmit.target_scopes), best fitness within each
+        rank = {sc: i for i, sc in enumerate(scopes)}
+        queue = sorted(queue, key=lambda q: rank.get(_scope(q["settings"]), len(scopes)))
+    for q in queue:
         if submitted >= room:
             break
         aid = q["alpha_id"]
-        s = checked(brain, brain.alpha(aid))
+        a = brain.alpha(aid)
+        if a.get("status") and a["status"] != "UNSUBMITTED":
+            # e.g. a Power Pool shape that autosubmit took first: it can't be submitted twice
+            conn.execute("update regular_queue set status='gone', detail=? where account=? and alpha_id=?",
+                         (f"status {a['status']} at BRAIN", account, aid))
+            conn.commit()
+            continue
+        s = checked(brain, a)
         if "checks" not in s:
             log("regular_skip", aid, "BRAIN check still running; next run")
             continue

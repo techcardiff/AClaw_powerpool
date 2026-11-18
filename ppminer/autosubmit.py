@@ -237,5 +237,6 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
                 day = ny_now().date()
                 out[account]["regular"] = regular.run_account(
                     conn, account, dry_run=force_dry_run or rcfg.get("dry_run", True), per_day=int(rcfg.get("per_day", 2)),
+                    scopes=target_scopes(acfg),
                     log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
     return out

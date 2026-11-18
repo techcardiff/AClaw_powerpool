@@ -112,14 +112,19 @@ def save(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict) 
     return True
 
 
-def queue_regular(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict, origin: str) -> bool:
-    """An alpha for the regular lane: strong at the regular bar but not a Power Pool shape (a Power
-    Pool shape goes through autosubmit instead, so one alpha is never in both)."""
+def queue_regular(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict, origin: str,
+                  any_shape: bool = False) -> bool:
+    """An alpha for the regular lane: strong at the regular bar. Normally not a Power Pool shape (that
+    goes through autosubmit instead). any_shape: Power Pool shapes too, for slots the Power Pool quota
+    leaves free (BRAIN allows 4 submissions a day in all); the regular lane skips any alpha that
+    autosubmit already submitted."""
     from . import regular
     st = alpha.get("settings") or {}
     expr = ((alpha.get("regular") or {}).get("code") or "").strip()
     chk = check(expr, catalog, st.get("region") or "USA")
-    if not expr or (chk.shape_ok and not chk.problems and not chk.unknown_ops):
+    if not expr or (not any_shape and chk.shape_ok and not chk.problems and not chk.unknown_ops):
+        return False
+    if conn.execute("select 1 from account_submitted where account=? and alpha_id=?", (account, alpha["id"])).fetchone():
         return False
     is_ = alpha.get("is") or {}
     return regular.add(conn, [{"account": account, "alpha_id": alpha["id"], "expr": expr, "settings": st,
@@ -130,7 +135,7 @@ def queue_regular(conn: sqlite3.Connection, catalog: Catalog, account: str, alph
 
 def run(conn: sqlite3.Connection, catalog: Catalog, account: str, per_account: int = 40,
         brain: Brain | None = None, bar: dict = QUALITY_DEFAULTS, scope: str | None = None,
-        regular_too: bool = False, per_regular: int = 10) -> dict:
+        regular_too: bool = False, per_regular: int = 10, any_shape: bool = False) -> dict:
     lanes.migrate(conn)
     brain = brain or Brain.from_cookie(ck.load_cookie(account))
     if not brain.is_authenticated():
@@ -143,8 +148,10 @@ def run(conn: sqlite3.Connection, catalog: Catalog, account: str, per_account: i
             break                                   # sorted by Sharpe: the rest are weaker
         if added < per_account and strong(a, bar) and save(conn, catalog, account, a):
             added += 1
-        elif regular_too and queued < per_regular and strong(a, QUALITY_DEFAULTS) \
-                and queue_regular(conn, catalog, account, a, f"scope {scope}" if scope else "brain import"):
+            if not any_shape:
+                continue
+        if regular_too and queued < per_regular and strong(a, QUALITY_DEFAULTS) \
+                and queue_regular(conn, catalog, account, a, f"scope {scope}" if scope else "brain import", any_shape):
             queued += 1
         if added >= per_account and (not regular_too or queued >= per_regular):
             break
