@@ -8,12 +8,21 @@ BRAIN as an unsubmitted alpha of its account, so this pulls the strongest ones b
 and the usual after_batch -> picks -> auto-submit path does the rest (fresh BRAIN check,
 Power Pool correlation, quality bar, quota). Nothing here submits.
 
-    python -m ppminer import-brain [--per-account 40] [--accounts HT52122 YO50689]
+    python -m ppminer import-brain [--per-account 40] [--account HT52122]...
+    python -m ppminer import-brain --scope EUR/1 --scope USA/0 --account HT52122 --per-account 25 --pp-bar --regular
+
+Scopes (region/delay): Osmosis only counts a scope once an account has 10 submitted alphas in it,
+so --scope pulls in the account's own alphas of the scopes it is short in (the autosubmit order
+puts them first, accounts.<id>.scope_targets). --pp-bar imports at the Power Pool bar (theme
+alphas are judged against THEME_BAR later), and --regular queues the scope's alphas that pass
+the regular bar but not the Power Pool shape for the regular lane (regular.py).
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+
+import requests
 
 from . import cookies as ck, lanes
 from .brain import BASE, Brain
@@ -38,16 +47,34 @@ def strong(alpha: dict, bar: dict = QUALITY_DEFAULTS) -> bool:
     return not (fails & HARD_FAILS)
 
 
-def unsubmitted(brain: Brain, max_pages: int = MAX_PAGES):
-    """The account's unsubmitted alphas, best in-sample Sharpe first."""
+PP_BAR = {"min_sharpe": 1.2, "min_fitness": 0.8, "max_turnover": 0.4}
+
+
+def unsubmitted(brain: Brain, max_pages: int = MAX_PAGES, region: str | None = None, delay: int | None = None):
+    """The account's unsubmitted alphas, best in-sample Sharpe first, optionally of one scope.
+    BRAIN refuses offsets past about 1,000 (18 Nov: 400 at offset 1,100), which ends the listing."""
+    params = {"limit": PAGE, "status": "UNSUBMITTED", "order": "-is.sharpe", "hidden": "false"}
+    if region:
+        params["settings.region"] = region
+    if delay is not None:
+        params["settings.delay"] = delay
     for page in range(max_pages):
-        j = brain._req("GET", f"{BASE}/users/self/alphas",
-                       params={"limit": PAGE, "offset": page * PAGE, "status": "UNSUBMITTED",
-                               "order": "-is.sharpe", "hidden": "false"}).json()
+        try:
+            j = brain._req("GET", f"{BASE}/users/self/alphas", params={**params, "offset": page * PAGE}).json()
+        except requests.HTTPError:
+            if page == 0:
+                raise
+            return
         res = j.get("results") or []
         yield from res
         if len(res) < PAGE or (page + 1) * PAGE >= j.get("count", 0):
             return
+
+
+def parse_scope(scope: str) -> tuple[str, int]:
+    """'EUR/1' -> ('EUR', 1); a bare region means delay 1."""
+    region, _, delay = scope.partition("/")
+    return region.upper(), int(delay or 1)
 
 
 def save(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict) -> bool:
@@ -85,19 +112,43 @@ def save(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict) 
     return True
 
 
+def queue_regular(conn: sqlite3.Connection, catalog: Catalog, account: str, alpha: dict, origin: str) -> bool:
+    """An alpha for the regular lane: strong at the regular bar but not a Power Pool shape (a Power
+    Pool shape goes through autosubmit instead, so one alpha is never in both)."""
+    from . import regular
+    st = alpha.get("settings") or {}
+    expr = ((alpha.get("regular") or {}).get("code") or "").strip()
+    chk = check(expr, catalog, st.get("region") or "USA")
+    if not expr or (chk.shape_ok and not chk.problems and not chk.unknown_ops):
+        return False
+    is_ = alpha.get("is") or {}
+    return regular.add(conn, [{"account": account, "alpha_id": alpha["id"], "expr": expr, "settings": st,
+                               "origin": origin, "note": "own unsubmitted alpha, regular bar, BRAIN in-sample",
+                               "sharpe": is_.get("sharpe"), "fitness": is_.get("fitness"),
+                               "turnover": is_.get("turnover")}]) > 0
+
+
 def run(conn: sqlite3.Connection, catalog: Catalog, account: str, per_account: int = 40,
-        brain: Brain | None = None, bar: dict = QUALITY_DEFAULTS) -> dict:
+        brain: Brain | None = None, bar: dict = QUALITY_DEFAULTS, scope: str | None = None,
+        regular_too: bool = False, per_regular: int = 10) -> dict:
     lanes.migrate(conn)
     brain = brain or Brain.from_cookie(ck.load_cookie(account))
     if not brain.is_authenticated():
         return {"status": "waiting_login"}
-    seen = added = 0
-    for a in unsubmitted(brain):
+    region, delay = parse_scope(scope) if scope else (None, None)
+    seen = added = queued = 0
+    for a in unsubmitted(brain, region=region, delay=delay):
         seen += 1
         if (a.get("is") or {}).get("sharpe") is not None and a["is"]["sharpe"] < bar.get("min_sharpe", 1.5):
             break                                   # sorted by Sharpe: the rest are weaker
-        if strong(a, bar) and save(conn, catalog, account, a):
+        if added < per_account and strong(a, bar) and save(conn, catalog, account, a):
             added += 1
-            if added >= per_account:
-                break
-    return {"status": "done", "seen": seen, "added": added}
+        elif regular_too and queued < per_regular and strong(a, QUALITY_DEFAULTS) \
+                and queue_regular(conn, catalog, account, a, f"scope {scope}" if scope else "brain import"):
+            queued += 1
+        if added >= per_account and (not regular_too or queued >= per_regular):
+            break
+    out = {"status": "done", "seen": seen, "added": added}
+    if regular_too:
+        out["regular_queued"] = queued
+    return out

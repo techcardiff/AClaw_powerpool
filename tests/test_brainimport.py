@@ -74,3 +74,35 @@ def test_per_account_cap():
 def test_fresh_database_has_no_field_table_yet():
     c = _conn()
     assert Catalog("/nonexistent").add_account_fields(c, "HT52122") == 0
+
+
+def test_scope_filter_and_regular_queue():
+    from ppminer import regular
+    pp_shape = alpha("P1", "rank(ts_mean(close, 20))", sharpe=2.0)
+    big = alpha("R1", "rank(close) + rank(volume) + rank(open) + rank(high)", sharpe=2.1)   # 4 fields: not a PP shape
+    for a in (big, pp_shape):
+        a["settings"]["delay"] = 0
+    br = FakeBrain([big, pp_shape])
+    c, cat = _conn(), _cat()
+    out = brainimport.run(c, cat, "HT52122", brain=br, scope="USA/0", bar=brainimport.PP_BAR, regular_too=True)
+    assert out == {"status": "done", "seen": 2, "added": 1, "regular_queued": 1}
+    assert br.calls[0]["settings.region"] == "USA" and br.calls[0]["settings.delay"] == 0
+    assert [r[0] for r in c.execute("select alpha_id from resims")] == ["P1"]
+    regular.migrate(c)
+    assert [r[0] for r in c.execute("select alpha_id from regular_queue")] == ["R1"]
+
+def test_parse_scope():
+    assert brainimport.parse_scope("eur/0") == ("EUR", 0)
+    assert brainimport.parse_scope("GLB") == ("GLB", 1)
+
+
+def test_target_scopes_order_and_expiry():
+    import datetime
+    from ppminer import autosubmit
+    acfg = {"scope_targets": {"scopes": ["EUR/1", "usa/0", "GLB"], "until": "2026-11-22"}}
+    scopes = autosubmit.target_scopes(acfg, today=datetime.date(2026, 11, 20))
+    assert scopes == ["EUR/1", "USA/0", "GLB/1"]
+    assert autosubmit.target_scopes(acfg, today=datetime.date(2026, 11, 23)) == []
+    pick = lambda region, delay: {"settings": json.dumps({"region": region, "delay": delay}), "region": region}
+    ranks = [autosubmit.scope_rank(pick(r, d), scopes) for r, d in (("USA", 1), ("GLB", 1), ("USA", 0), ("EUR", 1))]
+    assert ranks == [3, 2, 1, 0]

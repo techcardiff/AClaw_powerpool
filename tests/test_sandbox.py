@@ -15,7 +15,7 @@ def test_sandbox_forces_dry_run(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "ON", True)
     seen = {}
     monkeypatch.setattr(autosubmit, "load_config", lambda: {"accounts": {"X": {"enabled": True, "dry_run": False}}})
-    monkeypatch.setattr(autosubmit, "run_account", lambda conn, cat, acc, dry_run, quality=None: seen.setdefault(acc, dry_run))
+    monkeypatch.setattr(autosubmit, "run_account", lambda conn, cat, acc, dry_run, quality=None, scopes=None: seen.setdefault(acc, dry_run))
     monkeypatch.setattr(autosubmit.Catalog, "add_account_fields", lambda self, conn, acc: None)
     monkeypatch.setattr(autosubmit, "single_submitter", lambda: __import__("contextlib").nullcontext())
     autosubmit.run(str(tmp_path / "pp.db"), str(tmp_path))

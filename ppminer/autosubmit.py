@@ -90,7 +90,28 @@ def _rule_themes(p, theme) -> list[str]:
     return th.theme_names(p["checks"], theme, p["region"] or st.get("region"), st.get("delay"))
 
 
-def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None) -> dict:
+def target_scopes(acfg: dict, today=None) -> list[str]:
+    """accounts.<id>.scope_targets = {"scopes": ["EUR/1", "USA/0"], "until": "2026-11-22"}: scopes
+    (region/delay) to submit in first, most needed first, until that New York date (inclusive).
+    Osmosis only counts a scope once it has 10 submitted alphas, so filling the nearest ones
+    before a cutoff beats spreading submissions."""
+    st = acfg.get("scope_targets") or {}
+    until = st.get("until")
+    today = today or ny_now().date()
+    if until and str(today) > str(until):
+        return []
+    return [s.upper() if "/" in s else f"{s.upper()}/1" for s in st.get("scopes") or []]
+
+
+def scope_rank(p, scopes: list[str]) -> int:
+    """Position of a pick's scope in the target list; picks outside it come after all targets."""
+    st = json.loads(p["settings"] or "{}")
+    scope = f"{(p['region'] or st.get('region') or 'USA').upper()}/{int(st.get('delay', 1))}"
+    return scopes.index(scope) if scope in scopes else len(scopes)
+
+
+def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None,
+                scopes: list[str] | None = None) -> dict:
     from .runner import CHECK_WAIT_SECONDS, after_batch, checked
     q0 = None
     brain = Brain.from_cookie(ck.load_cookie(account)) if account in ck.saved_accounts() else None
@@ -106,9 +127,11 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
     after_batch(conn, catalog, brain, account)        # recheck, PnL, pick list, draft descriptions
     theme = th.current(conn)
     submitted, tried = 0, 0
-    # theme-matching picks first: before week 6 the theme is optional, but matching alphas
-    # also count toward the theme's leaderboard (sorted() keeps the existing order otherwise)
-    cands = sorted(_candidates(conn, account), key=lambda p: not _rule_themes(p, theme))
+    # target scopes first (scope_targets, for Osmosis), then theme-matching picks: before week 6
+    # the theme is optional, but matching alphas also count toward the theme's leaderboard
+    # (sorted() keeps the existing order otherwise)
+    scopes = scopes or []
+    cands = sorted(_candidates(conn, account), key=lambda p: (scope_rank(p, scopes), not _rule_themes(p, theme)))
     for p in cands:
         if submitted >= q0.remaining:
             break
@@ -207,7 +230,7 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
             catalog = Catalog(catalog_dir)
             catalog.add_account_fields(conn, account)
             out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
-                                       quality=quality_bar(cfg, acfg))
+                                       quality=quality_bar(cfg, acfg), scopes=target_scopes(acfg))
             rcfg = acfg.get("regular") or {}
             if rcfg.get("enabled") and out[account].get("status") != "waiting_login":
                 # after Power Pool, from the reviewed queue only (regular.py); dry run unless the owner turns it off

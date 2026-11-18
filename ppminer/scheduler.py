@@ -122,9 +122,14 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
             """One pass for one account: field sync, then a mining cycle; an idle account
             (no session, nothing to do, paused, capped) waits here before the next pass."""
             c2 = connect(db_path)
+            # accounts.<id>.regions narrows this account's mining (e.g. to the scopes it is short
+            # of for Osmosis); the theme's regions always stay in
+            own = cfg["accounts"][account].get("regions")
+            regions_ = list(dict.fromkeys(own + [r for r in regions if theme is not None and r in theme.regions])) \
+                if own else regions
             try:
                 b = _brain(account)
-                for region in regions if b is not None else ():   # field catalogs: a few datasets per region
+                for region in regions_ if b is not None else ():   # field catalogs: a few datasets per region
                     try:
                         st = sync_step(c2, b, account, region)
                         if st["done"]:
@@ -143,7 +148,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                     catalog = Catalog(catalog_dir)
                     catalog.add_account_fields(c2, account)
                     r = cycle(c2, catalog, account, batch=int(cfg.get("batch", batch)), workers=workers,
-                              regions=regions, others=accounts,
+                              regions=regions_, others=accounts,
                               c_share=float(cfg.get("c_share", 0.375)),          # Lane C (funnel) share of each batch
                               slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
                               market_regions=mx_regions,                         # template exploration in free slots

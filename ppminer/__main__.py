@@ -240,9 +240,13 @@ def cmd_import_brain(args):
     from .catalog import Catalog
     conn = dbm.connect(DB_PATH)
     catalog = Catalog(CATALOG_DIR)
+    bar = brainimport.PP_BAR if args.pp_bar else brainimport.QUALITY_DEFAULTS
     for account in args.account or ["HT52122", "YO50689"]:
         catalog.add_account_fields(conn, account)
-        print(account, brainimport.run(conn, catalog, account, per_account=args.per_account))
+        for scope in args.scope or [None]:
+            print(account, scope or "all scopes", brainimport.run(
+                conn, catalog, account, per_account=args.per_account, bar=bar, scope=scope,
+                regular_too=args.regular, per_regular=args.per_regular))
 
 
 def cmd_themes(args):
@@ -539,7 +543,12 @@ def main(argv=None):
     sp.set_defaults(fn=cmd_regular_queue)
     sp = sub.add_parser("import-brain", help="stand-in submitter: unsubmitted BRAIN alphas -> candidates (never submits)")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
-    sp.add_argument("--per-account", type=int, default=40)
+    sp.add_argument("--per-account", type=int, default=40, help="Power Pool candidates per account (per scope)")
+    sp.add_argument("--scope", action="append", help="only this region/delay, e.g. EUR/1 or USA/0 (repeatable)")
+    sp.add_argument("--pp-bar", action="store_true", help="import at the Power Pool bar (Sharpe 1.2, fitness 0.8)")
+    sp.add_argument("--regular", action="store_true",
+                    help="also queue non-Power-Pool-shape alphas at the regular bar for the regular lane")
+    sp.add_argument("--per-regular", type=int, default=10, help="regular-queue additions per account (per scope)")
     sp.set_defaults(fn=cmd_import_brain)
     sp = sub.add_parser("autosubmit", help="submit today's Power Pool alphas (data/autosubmit.json); the only submitter")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")

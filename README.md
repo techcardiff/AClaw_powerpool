@@ -73,6 +73,17 @@ When the 3080 can't be reached, the lab workstation (`amaz@100.119.181.15` over 
   again from Telegram so the broker copies a fresh cookie to the 3080. What the stand-in submitted is
   on BRAIN, and the 3080 reads it back before its own next submission (quota, correlation).
 
+### Osmosis scopes (temporary steering)
+
+Osmosis counts a scope (region + delay) only once an account has 10 submitted alphas in it. To fill
+the nearest scopes before a cutoff, per account in `data/autosubmit.json`:
+- `"scope_targets": {"scopes": ["EUR/1", "USA/0"], "until": "2026-11-22"}`: auto-submit tries picks in
+  those scopes first (most needed first), until that New York date.
+- `"regions": ["EUR", "GLB"]`: that account mines only there (the theme's regions stay in).
+- `python -m ppminer import-brain --account HT52122 --scope EUR/1 --pp-bar --regular`: pulls the
+  account's own unsubmitted alphas of a scope in as candidates, and queues those that pass the regular
+  bar but aren't Power Pool shapes for the regular lane.
+
 ## Setup
 
 ```bash
