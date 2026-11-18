@@ -26,7 +26,7 @@ import sqlite3
 import time
 
 from . import superalpha, cookies as ck, lanes, ppcorr, regular
-from .brain import Brain, summarize
+from .brain import AuthRequired, Brain, summarize
 from .catalog import Catalog
 from .descheck import verified_description
 from . import theme as th
@@ -154,13 +154,22 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
             continue
         conn.execute("insert or replace into descriptions(candidate_id, text, model) values (?,?,?)", (cid, text, "verified"))
         conn.commit()
-        if not dry_run:
-            brain.set_description(aid, text)          # before the check: BRAIN's theme match needs it
-        s = checked(brain, brain.alpha(aid))
+        try:
+            if not dry_run:
+                brain.set_description(aid, text)          # before the check: BRAIN's theme match needs it
+            s = checked(brain, brain.alpha(aid))
+            if "checks" in s:
+                s["checks"] = ppcorr.fill(brain, conn, aid, s.get("checks") or [], account)   # when /check has no PP correlation
+        except AuthRequired:
+            raise
+        except Exception as e:
+            # 18 Nov: a rate-limited /check on one pick ended the whole pass, regular and super lanes
+            # included, three times in a row; one pick's trouble now only skips that pick
+            _log(conn, account, q.today, "skip", aid, cid, f"BRAIN error: {str(e)[:150]}; next run")
+            continue
         if "checks" not in s:
             _log(conn, account, q.today, "skip", aid, cid, f"BRAIN check still running after {CHECK_WAIT_SECONDS}s; next run")
             continue
-        s["checks"] = ppcorr.fill(brain, conn, aid, s.get("checks") or [], account)   # when /check has no PP correlation
         chk = json.dumps(s.get("checks"))
         themes = pp_themes(chk) if not dry_run else _rule_themes({**dict(p), "checks": chk}, theme)
         v, why = verdict(s["sharpe"], chk, require_theme=q.theme_required, theme_ok=bool(themes))
@@ -229,16 +238,24 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
                 continue
             catalog = Catalog(catalog_dir)
             catalog.add_account_fields(conn, account)
-            out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
-                                       quality=quality_bar(cfg, acfg), scopes=target_scopes(acfg))
+            try:
+                out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
+                                           quality=quality_bar(cfg, acfg), scopes=target_scopes(acfg))
+            except AuthRequired:
+                out[account] = {"status": "waiting_login"}
+            except Exception as e:      # a Power Pool error must not cost the regular and super lanes their turn
+                out[account] = {"status": "error", "error": str(e)[:200]}
             rcfg = acfg.get("regular") or {}
             if rcfg.get("enabled") and out[account].get("status") != "waiting_login":
                 # after Power Pool, from the reviewed queue only (regular.py); dry run unless the owner turns it off
                 day = ny_now().date()
-                out[account]["regular"] = regular.run_account(
-                    conn, account, dry_run=force_dry_run or rcfg.get("dry_run", True), per_day=int(rcfg.get("per_day", 2)),
-                    scopes=target_scopes(acfg),
-                    log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+                try:
+                    out[account]["regular"] = regular.run_account(
+                        conn, account, dry_run=force_dry_run or rcfg.get("dry_run", True), per_day=int(rcfg.get("per_day", 2)),
+                        scopes=target_scopes(acfg),
+                        log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+                except Exception as e:
+                    out[account]["regular"] = {"status": "error", "error": str(e)[:200]}
             scfg = acfg.get("super") or {}
             if scfg.get("enabled") and out[account].get("status") != "waiting_login":
                 # one super alpha a day (BRAIN's SUPER_SUBMISSION), last: Power Pool and regular go first
