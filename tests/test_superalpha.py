@@ -88,3 +88,30 @@ def test_live_sets_descriptions_and_submits_one():
     # simulated variants are reused the next day; nothing new is simulated
     out2 = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert out2["simulated"] == 0
+
+
+def test_pending_check_tries_when_correlation_endpoints_pass():
+    pend = [x if x["name"] not in ("SELF_CORRELATION", "PROD_CORRELATION") else c(x["name"], "PENDING") for x in BASE_OK]
+
+    class B(FakeBrain):
+        def check(self, aid, max_wait=0):
+            return {"is": {"checks": pend}}
+
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                return {"max": 0.48 if url.endswith("self") else 0.64}
+            return super()._poll(url, max_wait)
+
+    conn, b = _conn(), B()
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert out["submitted"] == 1
+
+    class High(B):
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                return {"max": 0.75}
+            return FakeBrain._poll(self, url, max_wait)
+
+    conn, b = _conn(), High()
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert out["submitted"] == 0 and b.submitted == []

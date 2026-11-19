@@ -45,6 +45,7 @@ FRESH_DAYS = 5                       # simulated variants older than this are si
 OK_WARNINGS = {"MATCHES_COMPETITION", "OSMOSIS_ALLOCATION", "MATCHES_THEMES", "MATCHES_PYRAMID"}
 MUST_PASS = ("SELF_CORRELATION", "PROD_CORRELATION")
 MIN_DESCRIPTION = 100
+MAX_CORRELATION = 0.7                # BRAIN's self/prod correlation limit
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -159,6 +160,21 @@ def judge(checks: list[dict]) -> tuple[str, str]:
     return "ok", ""
 
 
+def correlations(brain: Brain, aid: str, max_wait: int = 600) -> dict:
+    """Max self and prod correlation from BRAIN's correlation endpoints. 19 Nov: /check kept both
+    PENDING for 13 hours until they were requested; then they came back in under 20 s (self 0.48,
+    prod 0.64) while /check still said PENDING."""
+    out = {}
+    for kind in ("self", "prod"):
+        try:
+            out[kind] = brain._poll(f"{BASE}/alphas/{aid}/correlations/{kind}", max_wait=max_wait).get("max")
+        except AuthRequired:
+            raise
+        except Exception:
+            out[kind] = None
+    return out
+
+
 def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, log=None,
                 st: dict | None = None) -> dict:
     from . import cookies as ck
@@ -205,8 +221,14 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
             log("super_skip", aid, why)
             continue
         if verdict == "wait":
-            log("super_skip", aid, why + "; next run")
-            continue
+            corr = correlations(brain, aid)
+            if None in corr.values() or max(corr.values()) >= MAX_CORRELATION:
+                log("super_skip", aid, f"{why}; correlations {corr}; next run")
+                continue
+            # /check lags behind the correlation endpoints: both are under the limit, so try; a
+            # refusal from BRAIN only moves on to the next variant
+            why = f"/check still PENDING, correlations self {corr['self']} prod {corr['prod']}"
+            log("super_try", aid, why)
         if dry_run:
             log("super_dry_run", aid, f"would submit super alpha: sharpe {row['sharpe']} fitness {row['fitness']} "
                 f"| {row['selection']} | {row['combo']}")
