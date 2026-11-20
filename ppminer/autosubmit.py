@@ -111,7 +111,9 @@ def scope_rank(p, scopes: list[str]) -> int:
 
 
 def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: dict | None = None,
-                scopes: list[str] | None = None) -> dict:
+                scopes: list[str] | None = None, collect: list | None = None, collect_max: int = 5) -> dict:
+    """collect: instead of submitting, append each pick that passed everything (fresh check
+    included) to this list, up to collect_max; the caller submits the least correlated one."""
     from .runner import CHECK_WAIT_SECONDS, after_batch, checked
     q0 = None
     brain = Brain.from_cookie(ck.load_cookie(account)) if account in ck.saved_accounts() else None
@@ -192,6 +194,12 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         if low:
             _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
             continue
+        if collect is not None:
+            collect.append({"lane": "pp", "alpha_id": aid, "candidate_id": cid, "checks": chk, "sharpe": s["sharpe"],
+                            "fitness": s.get("fitness"), "turnover": s["turnover"], "themes": themes})
+            if len(collect) >= collect_max:
+                break
+            continue
         if dry_run:
             _log(conn, account, q.today, "dry_run", aid, cid, f"would submit: sharpe {s['sharpe']} TO {s['turnover']}"
                  f" | theme: {', '.join(themes) or 'none'}")
@@ -208,6 +216,103 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
              f" | theme: {', '.join(themes) or 'none'}")
         submitted += 1
     return {"status": "done", "submitted": submitted, "tried": tried, "quota_left_before": q0.remaining}
+
+
+def nonsuper_today(conn, account: str, today=None) -> int:
+    """Regular + Power Pool submissions this New York day: BRAIN's list (account_submitted, synced each
+    run) and our own log, whichever knows more; super alphas don't count."""
+    from .quota import ny_date
+    today = today or ny_now().date()
+    supers = {a for (a,) in conn.execute("select alpha_id from super_alphas where account=?", (account,))} \
+        if conn.execute("select 1 from sqlite_master where name='super_alphas'").fetchone() else set()
+    synced = sum(1 for aid, d in conn.execute("select alpha_id, date_submitted from account_submitted where account=?",
+                                               (account,)) if d and ny_date(d) == today and aid not in supers)
+    logged = conn.execute("""select count(*) from autosubmit_log where account=? and ny_date=?
+                             and action in ('submitted', 'regular_submitted')""", (account, str(today))).fetchone()[0]
+    return max(synced, logged)
+
+
+def prod_corr(brain, cand: dict):
+    """The candidate's production correlation: from its fresh check if BRAIN filled it, else the
+    correlation endpoint (max). None when BRAIN gives neither."""
+    from .brain import BASE
+    ch = {c.get("name"): c for c in json.loads(cand.get("checks") or "[]") or []}
+    v = (ch.get("PROD_CORRELATION") or {}).get("value")
+    if v is not None:
+        return v
+    try:
+        return brain._poll(f"{BASE}/alphas/{cand['alpha_id']}/correlations/prod", max_wait=300).get("max")
+    except AuthRequired:
+        raise
+    except Exception:
+        return None
+
+
+def daily_one(conn, catalog, account: str, acfg: dict, cfg: dict, dry_run: bool) -> dict:
+    """accounts.<id>.daily_total = N (owner, 20 Nov: 1): at most N regular + Power Pool submissions a day in
+    all. Both lanes only collect candidates that passed everything; the least correlated with BRAIN's
+    production alphas is submitted and the rest stay queued for later days. With a low value factor
+    more submissions a day add little, and low production correlation is what raises it."""
+    day = ny_now().date()
+    limit = int(acfg["daily_total"])
+    done = nonsuper_today(conn, account, day)
+    if done >= limit:
+        _log(conn, account, day, "daily_total", detail=f"{done}/{limit} regular + Power Pool today")
+        return {"status": "daily_total_reached", "submitted": 0}
+    cands: list[dict] = []
+    res = run_account(conn, catalog, account, dry_run=dry_run, quality=quality_bar(cfg, acfg),
+                      scopes=target_scopes(acfg), collect=cands)
+    if res.get("status") == "waiting_login":
+        return res
+    done = nonsuper_today(conn, account, day)            # run_account synced BRAIN's list just now
+    if done >= limit:
+        return {"status": "daily_total_reached", "submitted": 0}
+    rcfg = acfg.get("regular") or {}
+    if rcfg.get("enabled"):
+        regular.run_account(conn, account, dry_run=dry_run, scopes=target_scopes(acfg), collect=cands,
+                            log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+    if not cands:
+        return {**res, "status": "no_candidate", "submitted": 0}
+    brain = Brain.from_cookie(ck.load_cookie(account))
+    for c in cands:
+        c["prod"] = prod_corr(brain, c)
+    ranked = sorted(cands, key=lambda c: (c["prod"] is None, c["prod"] if c["prod"] is not None else 9))
+    summary = ", ".join(f"{c['alpha_id']}({c['lane']}) {c['prod']}" for c in ranked)
+    _log(conn, account, day, "daily_candidates", detail=summary[:900])
+    submitted = 0
+    for c in ranked:
+        if submitted >= limit - done:
+            break
+        aid = c["alpha_id"]
+        if c["prod"] is None:
+            _log(conn, account, day, "skip", aid, c.get("candidate_id"), "production correlation unknown; next run")
+            continue
+        if dry_run:
+            _log(conn, account, day, "dry_run", aid, c.get("candidate_id"),
+                 f"would submit ({c['lane']}, least correlated): prod {c['prod']} sharpe {c['sharpe']}")
+            submitted += 1
+            continue
+        r = brain.submit(aid)
+        if not r.get("submitted"):
+            _log(conn, account, day, "submit_failed", aid, c.get("candidate_id"), r)
+            continue
+        detail = (f"sharpe {c['sharpe']} TO {c['turnover']} prod {c['prod']} at {r.get('dateSubmitted')} | "
+                  f"least correlated of {len(ranked)}")
+        if c["lane"] == "pp":
+            conn.execute("update picks set status='submitted', decided_at=current_timestamp, note=? where alpha_id=?",
+                         (f"auto {r.get('dateSubmitted')}", aid))
+            _log(conn, account, day, "submitted", aid, c.get("candidate_id"),
+                 detail + f" | theme: {', '.join(c.get('themes') or []) or 'none'} | tags {r.get('tags')}")
+        else:
+            conn.execute("update regular_queue set status='submitted', detail=?, updated_at=current_timestamp "
+                         "where account=? and alpha_id=?", (f"{r.get('dateSubmitted')} tags {r.get('tags')}", account, aid))
+            _log(conn, account, day, "regular_submitted", aid, None, detail + f" | tags {r.get('tags')}")
+        conn.execute("insert or replace into account_submitted(account, alpha_id, tags, sharpe, date_submitted) "
+                     "values (?,?,?,?,?)", (account, aid, json.dumps(r.get("tags") or []), c["sharpe"], r.get("dateSubmitted")))
+        conn.commit()
+        submitted += 1
+    return {"status": "done", "submitted": submitted, "candidates": len(ranked),
+            "least_correlated": ranked[0]["alpha_id"] if ranked else None}
 
 
 def quality_bar(cfg: dict, acfg: dict) -> dict:
@@ -238,15 +343,21 @@ def run(db_path: str, catalog_dir: str, accounts: list[str] | None = None, force
                 continue
             catalog = Catalog(catalog_dir)
             catalog.add_account_fields(conn, account)
+            one_a_day = acfg.get("daily_total") is not None
             try:
-                out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
-                                           quality=quality_bar(cfg, acfg), scopes=target_scopes(acfg))
+                if one_a_day:     # one regular-or-Power-Pool choice a day, least correlated (daily_one)
+                    # live only when both lanes are live: the one choice may come from either
+                    dry = force_dry_run or acfg.get("dry_run", True) or (acfg.get("regular") or {}).get("dry_run", True)
+                    out[account] = daily_one(conn, catalog, account, acfg, cfg, dry_run=dry)
+                else:
+                    out[account] = run_account(conn, catalog, account, dry_run=force_dry_run or acfg.get("dry_run", True),
+                                               quality=quality_bar(cfg, acfg), scopes=target_scopes(acfg))
             except AuthRequired:
                 out[account] = {"status": "waiting_login"}
             except Exception as e:      # a Power Pool error must not cost the regular and super lanes their turn
                 out[account] = {"status": "error", "error": str(e)[:200]}
             rcfg = acfg.get("regular") or {}
-            if rcfg.get("enabled") and out[account].get("status") != "waiting_login":
+            if rcfg.get("enabled") and not one_a_day and out[account].get("status") != "waiting_login":
                 # after Power Pool, from the reviewed queue only (regular.py); dry run unless the owner turns it off
                 day = ny_now().date()
                 try:

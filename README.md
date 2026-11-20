@@ -84,6 +84,14 @@ the nearest scopes before a cutoff, per account in `data/autosubmit.json`:
   account's own unsubmitted alphas of a scope in as candidates, and queues those that pass the regular
   bar but aren't Power Pool shapes for the regular lane.
 
+### One a day, least correlated (since 20 Nov)
+
+With a low value factor, extra submissions add little and low production correlation is what helps.
+`accounts.<id>.daily_total = 1` makes autosubmit submit at most one regular-or-Power-Pool alpha a day:
+both lanes only collect the candidates that pass everything (fresh check included), the one with the
+lowest production correlation is submitted, and the rest stay queued for later days
+(`autosubmit.daily_one`). The super alpha keeps its own one a day.
+
 ### Super alphas (HT52122)
 
 `ppminer/superalpha.py`: one super alpha a day (BRAIN's SUPER_SUBMISSION limit), combining the

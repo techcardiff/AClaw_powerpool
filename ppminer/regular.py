@@ -79,7 +79,9 @@ def _scope(settings_json: str | None) -> str:
 
 
 def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: int = 2, brain: Brain | None = None,
-                log=None, scopes: list[str] | None = None) -> dict:
+                log=None, scopes: list[str] | None = None, collect: list | None = None, collect_max: int = 5) -> dict:
+    """collect: append each queued alpha that passes its fresh check to this list (up to collect_max)
+    instead of submitting; autosubmit.daily_one submits the least correlated candidate of both lanes."""
     from .runner import checked
     migrate(conn)
     log = log or (lambda *a, **k: None)
@@ -89,6 +91,8 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
         return {"status": "waiting_login"}
     total, regular = today_counts(conn, account)
     room = max(0, min(per_day - regular, DAILY_SUBMISSION_LIMIT - total))
+    if collect is not None:
+        room = collect_max
     if room == 0:
         log("regular_quota", detail=f"{regular}/{per_day} regular, {total}/{DAILY_SUBMISSION_LIMIT} in all today")
         return {"status": "quota_full", "submitted": 0}
@@ -119,6 +123,11 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
         conn.commit()
         if not ok:
             log("regular_skip", aid, why)
+            continue
+        if collect is not None:
+            collect.append({"lane": "regular", "alpha_id": aid, "checks": json.dumps(s["checks"]),
+                            "sharpe": s.get("sharpe"), "fitness": s.get("fitness"), "turnover": s.get("turnover")})
+            submitted += 1
             continue
         if dry_run:
             log("regular_dry_run", aid, f"would submit as regular: sharpe {s.get('sharpe')} fitness {s.get('fitness')}")
