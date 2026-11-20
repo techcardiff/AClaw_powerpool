@@ -82,3 +82,28 @@ def test_target_scopes_first_and_already_submitted_skipped(monkeypatch):
     assert b.submitted == ["eur", "usa0", "usa1"]          # target scopes first, then the rest; 4 - 0 = room 4
     st = dict(c.execute("select alpha_id, status from regular_queue").fetchall())
     assert st["taken"] == "gone"
+
+
+def test_resim_old_replaces_strong_and_drops_weak():
+    c = sqlite3.connect(":memory:"); c.row_factory = sqlite3.Row
+    regular.add(c, [{"account": "A", "alpha_id": a, "expr": "rank(close)", "settings": {"region": "USA", "delay": 1,
+                     "grade": "x"}, "fitness": 1.5} for a in ("old1", "old2", "fine")])
+    c.execute("update regular_queue set detail='fails OLD_SIMULATION=None' where alpha_id in ('old1','old2')")
+
+    class B:
+        def __init__(self):
+            self.n, self.settings = 0, []
+
+        def simulate(self, expr, st):
+            self.n += 1
+            self.settings.append(st)
+            sh = 2.0 if self.n == 1 else 0.9
+            return {"id": f"new{self.n}", "settings": st,
+                    "is": {"sharpe": sh, "fitness": 1.3 if sh > 1 else 0.4, "turnover": 0.1, "checks": []}}
+
+    b = B()
+    out = regular.resim_old(c, b, "A", workers=1, log=lambda m: None)
+    assert out == {"old": 2, "replaced": 1, "dropped": 1, "errors": 0}
+    assert "grade" not in b.settings[0]                       # only keys a simulation accepts
+    st = dict(c.execute("select alpha_id, status from regular_queue").fetchall())
+    assert st == {"old1": "replaced", "old2": "dropped", "fine": "queued", "new1": "queued"}

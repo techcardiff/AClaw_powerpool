@@ -146,3 +146,54 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
         log("regular_submitted", aid, f"sharpe {s.get('sharpe')} fitness {s.get('fitness')} tags {res.get('tags')}")
         submitted += 1
     return {"status": "done", "submitted": submitted, "room": room}
+
+
+# keys of an alpha's settings that a simulation request accepts (BRAIN's alpha record has more)
+SIM_KEYS = ("instrumentType", "region", "universe", "delay", "decay", "neutralization", "truncation",
+            "pasteurization", "unitHandling", "nanHandling", "maxTrade", "language", "visualization", "testPeriod")
+
+
+def resim_old(conn: sqlite3.Connection, brain: Brain, account: str, bar: dict | None = None, workers: int = 3,
+              log=print) -> dict:
+    """Queued alphas BRAIN refused as OLD_SIMULATION, simulated again with the same code and settings.
+    A fresh result that still clears the regular bar replaces the old one in the queue; otherwise the old
+    one is dropped. Simulating never submits."""
+    from concurrent.futures import ThreadPoolExecutor
+    from .brainimport import strong
+    from .verdict import QUALITY_DEFAULTS
+    migrate(conn)
+    bar = bar or QUALITY_DEFAULTS
+    rows = conn.execute("""select * from regular_queue where account=? and status='queued'
+                           and detail like '%OLD_SIMULATION%'""", (account,)).fetchall()
+
+    def one(q):
+        st = {k: v for k, v in json.loads(q["settings"] or "{}").items() if k in SIM_KEYS}
+        try:
+            return q, brain.simulate(q["expr"], st)
+        except Exception as e:
+            return q, e
+
+    out = {"old": len(rows), "replaced": 0, "dropped": 0, "errors": 0}
+    with ThreadPoolExecutor(workers) as ex:
+        for q, a in ex.map(one, rows):
+            if isinstance(a, Exception):
+                out["errors"] += 1
+                log(f"  {q['alpha_id']}: simulation failed: {str(a)[:120]}")
+                continue
+            i = a.get("is") or {}
+            if strong(a, bar):
+                add(conn, [{"account": account, "alpha_id": a["id"], "expr": q["expr"], "settings": a.get("settings"),
+                            "origin": f"re-simulation of {q['alpha_id']} (OLD_SIMULATION)", "note": q["note"],
+                            "sharpe": i.get("sharpe"), "fitness": i.get("fitness"), "turnover": i.get("turnover")}])
+                conn.execute("update regular_queue set status='replaced', detail=? where account=? and alpha_id=?",
+                             (f"re-simulated as {a['id']}", account, q["alpha_id"]))
+                out["replaced"] += 1
+                log(f"  {q['alpha_id']} -> {a['id']}: sharpe {i.get('sharpe')} fitness {i.get('fitness')} TO {i.get('turnover')}")
+            else:
+                conn.execute("update regular_queue set status='dropped', detail=? where account=? and alpha_id=?",
+                             (f"re-simulated as {a['id']}: below the regular bar now (sharpe {i.get('sharpe')}, "
+                              f"fitness {i.get('fitness')}, TO {i.get('turnover')})", account, q["alpha_id"]))
+                out["dropped"] += 1
+                log(f"  {q['alpha_id']} -> {a['id']}: below the bar now, sharpe {i.get('sharpe')} fitness {i.get('fitness')}")
+            conn.commit()
+    return out

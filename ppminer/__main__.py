@@ -231,6 +231,16 @@ def cmd_regular_queue(args):
     regular.migrate(conn)
     if args.action == "add":
         print("added", regular.add(conn, json.load(open(args.file))))
+    if args.action == "resim":
+        from . import cookies as ck
+        from .brain import Brain
+        for account in args.account or ["HT52122", "YO50689"]:
+            b = Brain.from_cookie(ck.load_cookie(account))
+            if not b.is_authenticated():
+                print(account, "not logged in")
+                continue
+            print(account, regular.resim_old(conn, b, account))
+        return
     for r in conn.execute("select account, alpha_id, status, sharpe, fitness, detail from regular_queue order by account, fitness desc"):
         print(" ", *tuple(r))
 
@@ -555,8 +565,10 @@ def main(argv=None):
         DB_PATH, CATALOG_DIR, a.account, a.hours, a.max_sims, a.batch, a.workers, a.c_share,
         a.regions.split(","), [o for o in a.others.split(",") if o]))
     sp = sub.add_parser("regular-queue", help="add a reviewed JSON list to the regular-submission queue, or list it")
-    sp.add_argument("action", choices=["add", "list"])
+    sp.add_argument("action", choices=["add", "list", "resim"],
+                    help="resim: simulate again the queued alphas BRAIN refused as OLD_SIMULATION (never submits)")
     sp.add_argument("file", nargs="?")
+    sp.add_argument("--account", action="append")
     sp.set_defaults(fn=cmd_regular_queue)
     sp = sub.add_parser("import-brain", help="stand-in submitter: unsubmitted BRAIN alphas -> candidates (never submits)")
     sp.add_argument("--account", action="append", help="limit to these accounts (repeatable)")
