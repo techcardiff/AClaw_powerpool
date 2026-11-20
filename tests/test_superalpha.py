@@ -67,7 +67,7 @@ def _conn():
 def test_dry_run_simulates_the_grid_and_names_the_best_without_submitting():
     conn, b = _conn(), FakeBrain()
     out = superalpha.run_account(conn, "HT52122", dry_run=True, brain=b)
-    assert out["simulated"] == len(superalpha.SELECTIONS) * len(superalpha.COMBOS)
+    assert out["simulated"] == len(superalpha.SELECTIONS) * len(superalpha.COMBOS) * len(superalpha.SCOPES)
     assert out["would_submit"] and b.submitted == [] and b.patched == []
 
 
@@ -115,3 +115,7 @@ def test_pending_check_tries_when_correlation_endpoints_pass():
     conn, b = _conn(), High()
     out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert out["submitted"] == 0 and b.submitted == []
+    # twins of an earlier super alpha are dropped, so the next run simulates new variants
+    assert conn.execute("select count(*) from super_alphas where status='simulated'").fetchone()[0] == 0
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert out["simulated"] > 0

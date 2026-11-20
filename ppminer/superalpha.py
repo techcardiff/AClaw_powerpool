@@ -37,9 +37,13 @@ create table if not exists super_alphas (
     primary key (account, alpha_id));
 """
 SELECTIONS = ("and(self_correlation < 0.4, turnover < 0.3)",
-              "self_correlation < 0.5",
               "and(self_correlation < 0.5, prod_correlation < 0.5)")
 COMBOS = ('combo_a(alpha, nlength=500)', 'combo_a(alpha, mode="algo2")')
+# 20 Nov: after wpoamxdQ (USA D1) every stored USA D1 variant came back as its twin (prod 0.93,
+# self 0.85); a super alpha combines the submitted alphas of its own region/delay, so other
+# scopes give different super alphas, and the value factor rewards region/delay diversity
+SCOPES = (("USA", 1, "TOP3000"), ("USA", 0, "TOP3000"), ("EUR", 1, "TOP2500"), ("GLB", 1, "TOP3000"),
+          ("ASI", 1, "MINVOL1M"))
 SELECTION_LIMIT = 20
 FRESH_DAYS = 5                       # simulated variants older than this are simulated again
 OK_WARNINGS = {"MATCHES_COMPETITION", "OSMOSIS_ALLOCATION", "MATCHES_THEMES", "MATCHES_PYRAMID"}
@@ -111,14 +115,15 @@ def simulate(brain: Brain, selection: str, combo: str, st: dict, max_wait: int =
 
 
 def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, selections=SELECTIONS,
-                  combos=COMBOS, workers: int = 3, log=print) -> int:
+                  combos=COMBOS, workers: int = 3, log=print, scopes=SCOPES) -> int:
+    """selection x combo, in one scope (st) or in every scope of `scopes`."""
     migrate(conn)
-    st = st or settings()
-    jobs = [(s, c) for s in selections for c in combos]
+    sts = [st] if st else [settings(region=r, delay=d, universe=u) for r, d, u in scopes]
+    jobs = [(s, c, x) for x in sts for s in selections for c in combos]
 
     def one(job):
         try:
-            return job, simulate(brain, job[0], job[1], st)
+            return job, simulate(brain, job[0], job[1], job[2])
         except AuthRequired:
             raise
         except Exception as e:
@@ -126,9 +131,9 @@ def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, sele
 
     n = 0
     with ThreadPoolExecutor(workers) as ex:
-        for (sel, combo), a in ex.map(one, jobs):
+        for (sel, combo, st), a in ex.map(one, jobs):
             if isinstance(a, Exception):
-                log(f"  super {sel} | {combo}: {a}")
+                log(f"  super {st['region']} D{st['delay']} {sel} | {combo}: {str(a)[:150]}")
                 continue
             i = a.get("is") or {}
             conn.execute("""insert or replace into super_alphas(account, alpha_id, selection, combo, settings, sharpe,
@@ -137,8 +142,8 @@ def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, sele
                          (account, a["id"], sel, combo, json.dumps(st), i.get("sharpe"), i.get("fitness"),
                           i.get("turnover"), json.dumps(i.get("checks") or [])))
             conn.commit()
-            log(f"  super {a['id']} sharpe {i.get('sharpe')} fitness {i.get('fitness')} TO {i.get('turnover')} "
-                f"| {sel} | {combo}")
+            log(f"  super {a['id']} {st['region']} D{st['delay']} sharpe {i.get('sharpe')} fitness {i.get('fitness')} "
+                f"TO {i.get('turnover')} | {sel} | {combo}")
             n += 1
     return n
 
@@ -222,7 +227,15 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
             continue
         if verdict == "wait":
             corr = correlations(brain, aid)
-            if None in corr.values() or max(corr.values()) >= MAX_CORRELATION:
+            known = [v for v in corr.values() if v is not None]
+            if known and max(known) >= MAX_CORRELATION:
+                # too close to what is already submitted: retrying never helps, let new variants come
+                conn.execute("update super_alphas set status='failed', detail=? where account=? and alpha_id=?",
+                             (f"correlations {corr}", account, aid))
+                conn.commit()
+                log("super_skip", aid, f"correlations {corr} >= {MAX_CORRELATION}; dropped")
+                continue
+            if None in corr.values():
                 log("super_skip", aid, f"{why}; correlations {corr}; next run")
                 continue
             # /check lags behind the correlation endpoints: both are under the limit, so try; a
