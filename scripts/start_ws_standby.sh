@@ -8,6 +8,9 @@
 # starts ppminer at boot, @reboot cron), so two submitters never run side by side for more than
 # about 5 minutes. It refuses to start while the 3080 is reachable. A port test, not an ssh
 # command: the workstation's key on the 3080 is restricted to copying cookies.
+# data/standby/PRIMARY (owner, 21 Nov 2026): the workstation is the submitter even with the 3080 up.
+# Then the start doesn't refuse and no guard runs; the 3080 has data/SUBMITTER_ELSEWHERE so its
+# start_3080.sh leaves its daily window out. Remove both files to hand back to the 3080.
 # No Qwen here: the scheduler mines with the shape-idea generator (gen.py) instead.
 set -u
 cd "$(dirname "$0")/.."
@@ -22,7 +25,8 @@ up3080() { timeout 10 bash -c "</dev/tcp/$HOST3080/$PORT3080" 2>/dev/null; }
 
 alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
 
-if up3080; then
+PRIMARY=0; [ -f "$RUN/PRIMARY" ] && PRIMARY=1
+if [ $PRIMARY = 0 ] && up3080; then
   echo "the 3080 is reachable: it is the submitter, not starting the stand-in"
   exit 1
 fi
@@ -42,7 +46,9 @@ else
   echo "scheduler started (loop pid $!), log $LOG/daily.log"
 fi
 
-if alive guard; then
+if [ $PRIMARY = 1 ]; then
+  echo "workstation is the submitter (data/standby/PRIMARY): no guard"
+elif alive guard; then
   echo "guard already running (pid $(cat "$RUN/guard.pid"))"
 else
   nohup bash -c "while true; do sleep 300; \

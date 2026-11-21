@@ -14,6 +14,10 @@
 # To restart a service, kill its window (tmux kill-window -t ppminer:web) and run this
 # script again. Don't pkill by pattern: the window's restart loop matches it too.
 #
+# data/SUBMITTER_ELSEWHERE (owner, 21 Nov 2026: the lab workstation is the submitter, see
+# scripts/start_ws_standby.sh): the daily window is not started, so a reboot here never makes a
+# second submitter. Remove the file to make the 3080 the submitter again.
+#
 # The Telegram broker can't run here (api.telegram.org is blocked from this network);
 # it runs on the Mac and copies fresh session cookies into data/secrets/.
 set -u
@@ -45,5 +49,9 @@ ensure() {   # ensure <window-name> <command>
 }
 ensure qwen-tunnel "$TUNNEL"
 ensure web "$WEB"
-ensure daily "$DAILY"
+if [ -f "$ROOT/data/SUBMITTER_ELSEWHERE" ]; then
+  echo "daily not started: $(head -1 "$ROOT/data/SUBMITTER_ELSEWHERE")"
+else
+  ensure daily "$DAILY"
+fi
 ensure tunnel "$TUNNEL_WEB"
