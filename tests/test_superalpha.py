@@ -156,3 +156,18 @@ def test_check_timeout_still_tries_when_correlations_pass():
 
     conn, b = _conn(), B()
     assert superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)["submitted"] == 1
+
+
+def test_brain_error_variants_are_not_resent_every_pass(monkeypatch):
+    sent = []
+
+    def fail(brain, sel, combo, st, max_wait=0):
+        sent.append((sel, combo, st["region"]))
+        raise RuntimeError("super simulation failed: ERROR At least 10 component alphas are required for Super Alpha.")
+
+    monkeypatch.setattr(superalpha, "simulate", fail)
+    conn, b = _conn(), FakeBrain()
+    n = len(superalpha.SELECTIONS) * len(superalpha.COMBOS) * len(superalpha.SCOPES)
+    assert superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)["simulated"] == 0 and len(sent) == n
+    superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert len(sent) == n and b.submitted == []

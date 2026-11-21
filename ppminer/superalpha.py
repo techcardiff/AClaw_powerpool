@@ -37,7 +37,11 @@ create table if not exists super_alphas (
     primary key (account, alpha_id));
 """
 SELECTIONS = ("and(self_correlation < 0.4, turnover < 0.3)",
-              "and(self_correlation < 0.5, prod_correlation < 0.5)")
+              "and(self_correlation < 0.5, prod_correlation < 0.5)",
+              # 21 Nov: other subsets of the USA D1 pool than wpoamxdQ's (self < 0.4, turnover < 0.3),
+              # since only USA D1 has the 10 component alphas BRAIN needs (EUR D1 has 9)
+              "and(prod_correlation < 0.6, turnover > 0.1)",
+              "and(operator_count < 5, self_correlation < 0.5)")
 COMBOS = ('combo_a(alpha, nlength=500)', 'combo_a(alpha, mode="algo2")')
 # 20 Nov: after wpoamxdQ (USA D1) every stored USA D1 variant came back as its twin (prod 0.93,
 # self 0.85); a super alpha combines the submitted alphas of its own region/delay, so other
@@ -96,8 +100,17 @@ def describe(selection: str, combo: str, st: dict) -> tuple[str, str]:
                f"{st.get('selectionLimit', SELECTION_LIMIT)} of them. ")
     else:
         sel = f"Selection: all of {who}, up to {st.get('selectionLimit', SELECTION_LIMIT)} of them. "
-    sel += ("Low mutual correlation means each component carries a different signal, so the combination "
-            "diversifies risk instead of repeating one idea; capping turnover keeps trading costs down.")
+    why = []
+    if re.search(r"(self|prod)_correlation\s*<", selection):
+        why.append("low correlation means each component carries a different signal, so the combination "
+                   "diversifies risk instead of repeating one idea")
+    if re.search(r"turnover\s*<", selection):
+        why.append("capping turnover keeps trading costs down")
+    if re.search(r"turnover\s*>", selection):
+        why.append("a turnover floor favours faster-trading components that the slower ones don't already cover")
+    if re.search(r"operator_count\s*<", selection):
+        why.append("few operators keeps to simple expressions, which are less likely to be overfit")
+    sel += ("; ".join(why) or "combining many alphas diversifies risk instead of repeating one idea").capitalize() + "."
     n = re.search(r"nlength\s*=\s*(\d+)", combo)
     m = re.search(r"mode\s*=\s*[\"'](\w+)[\"']", combo)
     days = n.group(1) if n else "250"
@@ -149,6 +162,15 @@ def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, sele
         for (sel, combo, st), a in ex.map(one, jobs):
             if isinstance(a, Exception):
                 log(f"  super {st['region']} D{st['delay']} {sel} | {combo}: {str(a)[:150]}")
+                if "ERROR" in str(a):
+                    # e.g. "At least 10 component alphas are required" (21 Nov: every scope but USA D1):
+                    # kept as failed so the grid resends it only after FRESH_DAYS, not every pass
+                    import hashlib
+                    fake = "err-" + hashlib.md5(repr(_key(sel, combo, st)).encode()).hexdigest()[:12]
+                    conn.execute("""insert or replace into super_alphas(account, alpha_id, selection, combo, settings,
+                                        status, detail, updated_at) values (?,?,?,?,?,'failed',?,current_timestamp)""",
+                                 (account, fake, sel, combo, json.dumps(st), str(a)[:300]))
+                    conn.commit()
                 continue
             i = a.get("is") or {}
             conn.execute("""insert or replace into super_alphas(account, alpha_id, selection, combo, settings, sharpe,

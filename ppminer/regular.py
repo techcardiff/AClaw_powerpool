@@ -17,7 +17,7 @@ import json
 import sqlite3
 
 from . import cookies as ck
-from .brain import Brain
+from .brain import AuthRequired, Brain
 from .quota import DAILY_SUBMISSION_LIMIT, ny_date, ny_now
 
 SCHEMA = """
@@ -113,7 +113,13 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
                          (f"status {a['status']} at BRAIN", account, aid))
             conn.commit()
             continue
-        s = checked(brain, a, wait)
+        try:
+            s = checked(brain, a, wait)
+        except AuthRequired:
+            raise
+        except Exception as e:           # e.g. "rate limited too long": skip this alpha, not the queue
+            log("regular_skip", aid, f"BRAIN error: {str(e)[:150]}; next run")
+            continue
         if "checks" not in s:
             if again is not None:
                 again.append(q)          # back to it once the rest of the queue is checked

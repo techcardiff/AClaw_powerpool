@@ -128,3 +128,18 @@ def test_slow_check_is_retried_after_the_rest_of_the_queue():
     assert [x[0] for x in b.calls] == ["good", "corr", "next", "good"]
     assert b.calls[-1][1] == runner.CHECK_SECOND_WAIT
     assert [x["alpha_id"] for x in cands] == ["next", "good"]
+
+
+def test_brain_error_on_one_alpha_skips_only_that_alpha():
+    c = _conn([])
+
+    class Limited(FakeBrain):
+        def check(self, aid, max_wait=0):
+            if aid == "good":
+                raise RuntimeError("rate limited too long on /check")
+            return super().check(aid, max_wait)
+
+    b = Limited({"good": chk(), "corr": chk(), "next": chk()})
+    cands = []
+    regular.run_account(c, "A", dry_run=False, brain=b, collect=cands)
+    assert [x["alpha_id"] for x in cands] == ["corr", "next"]

@@ -274,8 +274,15 @@ def daily_one(conn, catalog, account: str, acfg: dict, cfg: dict, dry_run: bool)
         return {"status": "daily_total_reached", "submitted": 0}
     rcfg = acfg.get("regular") or {}
     if rcfg.get("enabled"):
-        regular.run_account(conn, account, dry_run=dry_run, scopes=target_scopes(acfg), collect=cands,
-                            log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+        try:
+            regular.run_account(conn, account, dry_run=dry_run, scopes=target_scopes(acfg), collect=cands,
+                                log=lambda action, aid=None, detail="": _log(conn, account, day, action, aid, None, detail))
+        except AuthRequired:
+            raise
+        except Exception as e:
+            # 21 Nov: a rate-limited /check in the regular lane ended HT52122's whole pass, super lane included;
+            # the Power Pool candidates already collected still count
+            _log(conn, account, day, "regular_error", detail=f"BRAIN error: {str(e)[:150]}; next run")
     if not cands:
         return {**res, "status": "no_candidate", "submitted": 0}
     brain = Brain.from_cookie(ck.load_cookie(account))

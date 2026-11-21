@@ -54,7 +54,8 @@ def own_pnl_corr(brain: Brain, conn: sqlite3.Connection, account: str, alpha_id:
 def estimate(brain: Brain, alpha_id: str, pp_ids: set[str], conn: sqlite3.Connection | None = None,
              account: str | None = None) -> tuple[float | None, str]:
     """(value, how). value None = can't tell."""
-    d = brain._poll(f"{BASE}/alphas/{alpha_id}/correlations/self", max_wait=300)
+    # 60 s, not 300: 21 Nov, four of these timed out in one pass and held it 20 minutes
+    d = brain._poll(f"{BASE}/alphas/{alpha_id}/correlations/self", max_wait=60)
     names = [p["name"] for p in d["schema"]["properties"]]
     i_id, i_c = names.index("id"), names.index("correlation")
     recs = [(r[i_id], r[i_c]) for r in d.get("records", []) if r[i_c] is not None]
