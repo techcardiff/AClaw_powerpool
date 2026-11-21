@@ -115,7 +115,44 @@ def test_pending_check_tries_when_correlation_endpoints_pass():
     conn, b = _conn(), High()
     out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert out["submitted"] == 0 and b.submitted == []
-    # twins of an earlier super alpha are dropped, so the next run simulates new variants
+    # twins of an earlier super alpha are dropped, and the same grid isn't simulated again
     assert conn.execute("select count(*) from super_alphas where status='simulated'").fetchone()[0] == 0
     out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
-    assert out["simulated"] > 0
+    assert out["simulated"] == 0
+
+
+def test_unanswered_old_variants_dont_hold_back_the_grid():
+    class Slow(FakeBrain):
+        def check(self, aid, max_wait=0):
+            assert max_wait <= superalpha.CHECK_WAIT
+            raise TimeoutError(aid)
+
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                raise TimeoutError(url)
+            return super()._poll(url, max_wait)
+
+    conn, b = _conn(), Slow()
+    superalpha.migrate(conn)
+    conn.execute("insert into super_alphas(account, alpha_id, selection, combo, settings, fitness, checks) "
+                 "values ('HT52122', 'OLD1', '1', 'combo_a(alpha)', ?, 9, '[]')", ('{"region": "USA", "delay": 1}',))
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    n = len(superalpha.SELECTIONS) * len(superalpha.COMBOS) * len(superalpha.SCOPES)
+    assert out["simulated"] == n and out["submitted"] == 0
+    old = conn.execute("select status, detail, checks from super_alphas where alpha_id='OLD1'").fetchone()
+    assert old["status"] == "simulated" and old["checks"] == "[]" and "still running" in old["detail"]
+    assert superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)["simulated"] == 0
+
+
+def test_check_timeout_still_tries_when_correlations_pass():
+    class B(FakeBrain):
+        def check(self, aid, max_wait=0):
+            raise TimeoutError(aid)
+
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                return {"max": 0.5}
+            return super()._poll(url, max_wait)
+
+    conn, b = _conn(), B()
+    assert superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)["submitted"] == 1

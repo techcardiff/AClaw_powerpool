@@ -15,8 +15,8 @@ BRAIN (18 Nov, HT52122 has the SUPER_ALPHA permission, YO50689 not yet):
 Per account and day (config accounts.<id>.super = {"enabled": true, "dry_run": true}), inside
 autosubmit, so it stays the single submitter:
   1. stop if BRAIN's SUPER_SUBMISSION shows today's super alpha already in
-  2. if no simulated, unsubmitted variant from the last few days is left, simulate the grid
-  3. best fitness first: descriptions, fresh check, every check PASS (warnings only on
+  2. simulate the grid variants (selection x combo x scope) not simulated in the last few days
+  3. newest first, then best fitness: descriptions, fresh check, every check PASS (warnings only on
      competition/osmosis/theme), correlation PASS; submit one
 """
 from __future__ import annotations
@@ -50,6 +50,11 @@ OK_WARNINGS = {"MATCHES_COMPETITION", "OSMOSIS_ALLOCATION", "MATCHES_THEMES", "M
 MUST_PASS = ("SELF_CORRELATION", "PROD_CORRELATION")
 MIN_DESCRIPTION = 100
 MAX_CORRELATION = 0.7                # BRAIN's self/prod correlation limit
+# 20 Nov: /check and the correlation endpoints answered none of the 5 stored variants all
+# afternoon; 5 min on each in turn found nothing and the new grid never ran. Short waits now,
+# and the grid no longer waits for the old variants to be settled.
+CHECK_WAIT = 60
+CORRELATION_WAIT = 60
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -114,12 +119,22 @@ def simulate(brain: Brain, selection: str, combo: str, st: dict, max_wait: int =
     return brain.alpha(sim["alpha"])
 
 
+def _key(selection: str, combo: str, st: dict) -> tuple:
+    return selection, combo, st.get("region"), st.get("delay"), st.get("universe")
+
+
 def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, selections=SELECTIONS,
-                  combos=COMBOS, workers: int = 3, log=print, scopes=SCOPES) -> int:
-    """selection x combo, in one scope (st) or in every scope of `scopes`."""
+                  combos=COMBOS, workers: int = 3, log=print, scopes=SCOPES, missing_only: bool = False) -> int:
+    """selection x combo, in one scope (st) or in every scope of `scopes`. missing_only: skip the
+    variants already simulated (any status) in the last FRESH_DAYS days."""
     migrate(conn)
     sts = [st] if st else [settings(region=r, delay=d, universe=u) for r, d, u in scopes]
     jobs = [(s, c, x) for x in sts for s in selections for c in combos]
+    if missing_only:
+        have = {_key(r["selection"], r["combo"], json.loads(r["settings"] or "{}")) for r in conn.execute(
+            f"""select selection, combo, settings from super_alphas where account=?
+                and created_at >= datetime('now', '-{FRESH_DAYS} days')""", (account,))}
+        jobs = [j for j in jobs if _key(*j) not in have]
 
     def one(job):
         try:
@@ -165,7 +180,7 @@ def judge(checks: list[dict]) -> tuple[str, str]:
     return "ok", ""
 
 
-def correlations(brain: Brain, aid: str, max_wait: int = 600) -> dict:
+def correlations(brain: Brain, aid: str, max_wait: int = CORRELATION_WAIT) -> dict:
     """Max self and prod correlation from BRAIN's correlation endpoints. 19 Nov: /check kept both
     PENDING for 13 hours until they were requested; then they came back in under 20 s (self 0.48,
     prod 0.64) while /check still said PENDING."""
@@ -191,12 +206,11 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
         return {"status": "waiting_login"}
     fresh = lambda: conn.execute(
         f"""select * from super_alphas where account=? and status='simulated'
-            and created_at >= datetime('now', '-{FRESH_DAYS} days') order by fitness desc""", (account,)).fetchall()
+            and created_at >= datetime('now', '-{FRESH_DAYS} days')
+            order by created_at desc, fitness desc""", (account,)).fetchall()
+    simulated = simulate_grid(conn, brain, account, st, log=lambda m: log("super_sim", detail=m.strip()),
+                              missing_only=True)
     rows = fresh()
-    simulated = 0
-    if not rows:
-        simulated = simulate_grid(conn, brain, account, st, log=lambda m: log("super_sim", detail=m.strip()))
-        rows = fresh()
     for row in rows:
         aid = row["alpha_id"]
         sel_d, combo_d = describe(row["selection"], row["combo"], json.loads(row["settings"] or "{}"))
@@ -206,16 +220,18 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
                 "selection": {"code": row["selection"], "description": sel_d},
                 "combo": {"code": row["combo"], "description": combo_d}})
         try:
-            c = brain.check(aid, max_wait=300)
+            c = brain.check(aid, max_wait=CHECK_WAIT)
         except TimeoutError:
-            log("super_skip", aid, "BRAIN check still running; next run")
-            continue
-        checks = (c.get("is") or {}).get("checks") or []
+            c = None                     # still running: the correlation endpoints may answer sooner
+        checks = (c.get("is") or {}).get("checks") or [] if c else [
+            {"name": n, "result": "PENDING"} for n in MUST_PASS]
         if dry_run:   # without descriptions BRAIN fails the two length checks; judge as if they were set
             checks = [x for x in checks if not x.get("name", "").endswith("DESCRIPTION_LENGTH")]
         verdict, why = judge(checks)
-        conn.execute("update super_alphas set checks=?, detail=?, updated_at=current_timestamp where account=? and alpha_id=?",
-                     (json.dumps(checks), why or "ok", account, aid))
+        if c is None:
+            why = "BRAIN check still running"
+        conn.execute("update super_alphas set checks=coalesce(?, checks), detail=?, updated_at=current_timestamp "
+                     "where account=? and alpha_id=?", (json.dumps(checks) if c else None, why or "ok", account, aid))
         conn.commit()
         if verdict == "done_today":
             log("super_quota", aid, why)

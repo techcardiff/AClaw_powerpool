@@ -114,7 +114,7 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
                 scopes: list[str] | None = None, collect: list | None = None, collect_max: int = 5) -> dict:
     """collect: instead of submitting, append each pick that passed everything (fresh check
     included) to this list, up to collect_max; the caller submits the least correlated one."""
-    from .runner import CHECK_WAIT_SECONDS, after_batch, checked
+    from .runner import after_batch, checked, sweeps
     q0 = None
     brain = Brain.from_cookie(ck.load_cookie(account)) if account in ck.saved_accounts() else None
     if brain is None or not brain.is_authenticated():
@@ -134,8 +134,10 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
     # (sorted() keeps the existing order otherwise)
     scopes = scopes or []
     cands = sorted(_candidates(conn, account), key=lambda p: (scope_rank(p, scopes), not _rule_themes(p, theme)))
-    for p in cands:
-        if submitted >= q0.remaining:
+    late = lambda p: _log(conn, account, q.today, "skip", p["alpha_id"], p["candidate_id"],
+                          "BRAIN check still running after two tries; next run")
+    for p, wait, again in sweeps(cands, late):
+        if submitted >= q0.remaining or (collect is not None and len(collect) >= collect_max):
             break
         aid, cid = p["alpha_id"], p["candidate_id"]
         universe = json.loads(p["settings"] or "{}").get("universe")
@@ -145,7 +147,7 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
             # the Power Pool rule is only sharpe 1.0; income follows quality, so weak alphas wait
             _log(conn, account, q.today, "skip", aid, cid, "below quality bar: " + "; ".join(low))
             continue
-        tried += 1
+        tried += again is not None
         draft = conn.execute("select text from descriptions where candidate_id=?", (cid,)).fetchone()
         text, issues = verified_description(p["expr"], draft[0] if draft else None, catalog, p["region"] or "USA",
                                             json.loads(p["settings"] or "{}"))
@@ -157,9 +159,9 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
         conn.execute("insert or replace into descriptions(candidate_id, text, model) values (?,?,?)", (cid, text, "verified"))
         conn.commit()
         try:
-            if not dry_run:
+            if not dry_run and again is not None:
                 brain.set_description(aid, text)          # before the check: BRAIN's theme match needs it
-            s = checked(brain, brain.alpha(aid))
+            s = checked(brain, brain.alpha(aid), wait)
             if "checks" in s:
                 s["checks"] = ppcorr.fill(brain, conn, aid, s.get("checks") or [], account)   # when /check has no PP correlation
         except AuthRequired:
@@ -170,7 +172,10 @@ def run_account(conn, catalog: Catalog, account: str, dry_run: bool, quality: di
             _log(conn, account, q.today, "skip", aid, cid, f"BRAIN error: {str(e)[:150]}; next run")
             continue
         if "checks" not in s:
-            _log(conn, account, q.today, "skip", aid, cid, f"BRAIN check still running after {CHECK_WAIT_SECONDS}s; next run")
+            if again is not None:
+                again.append(p)                           # back to it once the others are checked
+            else:
+                late(p)
             continue
         chk = json.dumps(s.get("checks"))
         themes = pp_themes(chk) if not dry_run else _rule_themes({**dict(p), "checks": chk}, theme)

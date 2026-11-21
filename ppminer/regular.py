@@ -82,7 +82,7 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
                 log=None, scopes: list[str] | None = None, collect: list | None = None, collect_max: int = 5) -> dict:
     """collect: append each queued alpha that passes its fresh check to this list (up to collect_max)
     instead of submitting; autosubmit.daily_one submits the least correlated candidate of both lanes."""
-    from .runner import checked
+    from .runner import checked, sweeps
     migrate(conn)
     log = log or (lambda *a, **k: None)
     if brain is None:
@@ -102,7 +102,7 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
     if scopes:          # Osmosis target scopes first (autosubmit.target_scopes), best fitness within each
         rank = {sc: i for i, sc in enumerate(scopes)}
         queue = sorted(queue, key=lambda q: rank.get(_scope(q["settings"]), len(scopes)))
-    for q in queue:
+    for q, wait, again in sweeps(queue, lambda q: log("regular_skip", q["alpha_id"], "BRAIN check still running; next run")):
         if submitted >= room:
             break
         aid = q["alpha_id"]
@@ -113,9 +113,12 @@ def run_account(conn: sqlite3.Connection, account: str, dry_run: bool, per_day: 
                          (f"status {a['status']} at BRAIN", account, aid))
             conn.commit()
             continue
-        s = checked(brain, a)
+        s = checked(brain, a, wait)
         if "checks" not in s:
-            log("regular_skip", aid, "BRAIN check still running; next run")
+            if again is not None:
+                again.append(q)          # back to it once the rest of the queue is checked
+            else:
+                log("regular_skip", aid, "BRAIN check still running; next run")
             continue
         ok, why = judge(s["checks"])
         conn.execute("update regular_queue set checked=current_timestamp, detail=?, sharpe=?, fitness=?, turnover=? where account=? and alpha_id=?",

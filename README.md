@@ -92,13 +92,22 @@ both lanes only collect the candidates that pass everything (fresh check include
 lowest production correlation is submitted, and the rest stay queued for later days
 (`autosubmit.daily_one`). The super alpha keeps its own one a day.
 
+Checks are done in two sweeps (21 Nov): every candidate's BRAIN check gets 45 s, then the ones BRAIN
+hadn't finished get 150 s more at the end of the pass, within 20 minutes in all. Before, each pending
+check held the pass for 3 minutes in turn, and on 20 Nov HT52122's session expired before anything
+was submitted.
+
 ### Super alphas (HT52122)
 
 `ppminer/superalpha.py`: one super alpha a day (BRAIN's SUPER_SUBMISSION limit), combining the
 account's own submitted alphas. It runs inside autosubmit after Power Pool and regular, with
 `accounts.<id>.super = {"enabled": true, "dry_run": true}`. It simulates a small grid of selection
-(low self-correlation, turnover cap) x combo (`combo_a`) variants, writes both descriptions from the
-expressions, and submits the best one whose fresh check passes, correlation included.
+(low self-correlation, turnover cap) x combo (`combo_a`) variants in five region/delay scopes,
+writes both descriptions from the expressions, and submits the best one whose fresh check passes,
+correlation included. Grid variants not simulated in the last 5 days are simulated each pass, whether
+or not BRAIN has answered for the older ones; a variant whose self or production correlation comes
+back at 0.7 or more is dropped. Checks and correlation requests wait 60 s each; when /check is still
+running but both correlations are under 0.7, it tries the submission (BRAIN refuses it if a check fails).
 `python -m ppminer super sim --account HT52122` simulates the grid by hand; `super list` shows them.
 
 ## Setup

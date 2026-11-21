@@ -36,6 +36,13 @@ LOGIN_POLL_SECONDS = 300
 # (27 Oct: twice ~15 min in auto-submit). A result whose check is still running is saved
 # without checks and rechecked later (after_batch), like a PENDING check.
 CHECK_WAIT_SECONDS = 180
+# submit passes (autosubmit and regular lanes): every candidate's /check gets a short first wait,
+# then the ones BRAIN hadn't finished get a second, longer one at the end of the pass, within a
+# budget. 20 Nov: waiting 3 min on each of ~30 pending picks in turn took HT52122's whole
+# afternoon pass and its session expired before anything was submitted.
+CHECK_FIRST_WAIT = 45
+CHECK_SECOND_WAIT = 150
+SECOND_SWEEP_BUDGET = 20 * 60
 
 # BRAIN's own failures, not the alpha's: its generic "error while running the simulation.
 # Please try again" (27 Oct 16:00-18:40: ~340 sims, whole multi-simulations of any content,
@@ -56,10 +63,27 @@ PAUSE_SHARE = 0.9
 PAUSE_SECONDS = 20 * 60
 
 
-def checked(brain: Brain, alpha: dict) -> dict:
+def sweeps(items, log_late=None):
+    """Two-sweep check order. Yields (item, wait, again): first every item with CHECK_FIRST_WAIT and
+    a list `again` to append the item to when its check is still running; then those items once more
+    with CHECK_SECOND_WAIT (again is None) until SECOND_SWEEP_BUDGET runs out. log_late(item) is
+    called for the ones the budget leaves for the next pass."""
+    again: list = []
+    for it in list(items):
+        yield it, CHECK_FIRST_WAIT, again
+    deadline = time.time() + SECOND_SWEEP_BUDGET
+    for it in again:
+        if time.time() > deadline:
+            if log_late:
+                log_late(it)
+            continue
+        yield it, CHECK_SECOND_WAIT, None
+
+
+def checked(brain: Brain, alpha: dict, wait: int | None = None) -> dict:
     """summarize() with BRAIN's checks, or without them when /check runs past the cap."""
     try:
-        return summarize(alpha, brain.check(alpha["id"], max_wait=CHECK_WAIT_SECONDS))
+        return summarize(alpha, brain.check(alpha["id"], max_wait=wait or CHECK_WAIT_SECONDS))
     except TimeoutError:
         return summarize(alpha)
 

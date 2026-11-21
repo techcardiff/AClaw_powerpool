@@ -107,3 +107,24 @@ def test_resim_old_replaces_strong_and_drops_weak():
     assert "grade" not in b.settings[0]                       # only keys a simulation accepts
     st = dict(c.execute("select alpha_id, status from regular_queue").fetchall())
     assert st == {"old1": "replaced", "old2": "dropped", "fine": "queued", "new1": "queued"}
+
+
+def test_slow_check_is_retried_after_the_rest_of_the_queue():
+    from ppminer import runner
+    c = _conn([])
+
+    class Slow(FakeBrain):
+        calls = []
+
+        def check(self, aid, max_wait=0):
+            self.calls.append((aid, max_wait))
+            if aid == "good" and max_wait == runner.CHECK_FIRST_WAIT:
+                raise TimeoutError(aid)            # BRAIN still busy on the first try
+            return super().check(aid, max_wait)
+
+    b = Slow({"good": chk(), "corr": chk(SELF_CORRELATION="FAIL"), "next": chk()})
+    cands = []
+    regular.run_account(c, "A", dry_run=False, brain=b, collect=cands)
+    assert [x[0] for x in b.calls] == ["good", "corr", "next", "good"]
+    assert b.calls[-1][1] == runner.CHECK_SECOND_WAIT
+    assert [x["alpha_id"] for x in cands] == ["next", "good"]
