@@ -42,7 +42,12 @@ SCHEMA = """
 create table if not exists autosubmit_log (
     id integer primary key, ts timestamp default current_timestamp, account text, ny_date text,
     alpha_id text, candidate_id integer, action text, detail text);
+create table if not exists prod_corr_seen (
+    alpha_id text primary key, value real, seen_at timestamp default current_timestamp);
 """
+
+PROD_FIRST_WAIT, PROD_SECOND_WAIT = 90, 300
+PROD_SEEN_DAYS = 3
 
 
 def load_config(path: str = CONFIG) -> dict:
@@ -237,7 +242,7 @@ def nonsuper_today(conn, account: str, today=None) -> int:
     return max(synced, logged)
 
 
-def prod_corr(brain, cand: dict):
+def prod_corr(brain, cand: dict, wait: int = PROD_SECOND_WAIT):
     """The candidate's production correlation: from its fresh check if BRAIN filled it, else the
     correlation endpoint (max). None when BRAIN gives neither."""
     from .brain import BASE
@@ -246,11 +251,34 @@ def prod_corr(brain, cand: dict):
     if v is not None:
         return v
     try:
-        return brain._poll(f"{BASE}/alphas/{cand['alpha_id']}/correlations/prod", max_wait=300).get("max")
+        return brain._poll(f"{BASE}/alphas/{cand['alpha_id']}/correlations/prod", max_wait=wait).get("max")
     except AuthRequired:
         raise
     except Exception:
         return None
+
+
+def prod_corrs(conn, brain, cands: list[dict]) -> None:
+    """Fill c["prod"] for every candidate. 21 Nov: BRAIN's correlations/prod endpoint answered only now
+    and then, and one 5-minute wait per candidate left HT52122 with nothing it could rank on two passes.
+    So: every candidate gets a short wait, the unanswered ones a longer one after the rest, and a value
+    BRAIN gave in the last few days is used when it gives none now (c["prod_from"] says which)."""
+    conn.executescript(SCHEMA)
+    for c in cands:
+        c["prod"], c["prod_from"] = prod_corr(brain, c, PROD_FIRST_WAIT), "now"
+    for c in cands:
+        if c["prod"] is None:
+            c["prod"] = prod_corr(brain, c, PROD_SECOND_WAIT)
+    for c in cands:
+        if c["prod"] is not None:
+            conn.execute("insert or replace into prod_corr_seen(alpha_id, value, seen_at) values (?,?,current_timestamp)",
+                         (c["alpha_id"], c["prod"]))
+            continue
+        row = conn.execute("select value, seen_at from prod_corr_seen where alpha_id=? and "
+                           "seen_at >= datetime('now', ?)", (c["alpha_id"], f"-{PROD_SEEN_DAYS} days")).fetchone()
+        if row:
+            c["prod"], c["prod_from"] = row[0], f"seen {row[1]} UTC"
+    conn.commit()
 
 
 def daily_one(conn, catalog, account: str, acfg: dict, cfg: dict, dry_run: bool) -> dict:
@@ -286,10 +314,10 @@ def daily_one(conn, catalog, account: str, acfg: dict, cfg: dict, dry_run: bool)
     if not cands:
         return {**res, "status": "no_candidate", "submitted": 0}
     brain = Brain.from_cookie(ck.load_cookie(account))
-    for c in cands:
-        c["prod"] = prod_corr(brain, c)
+    prod_corrs(conn, brain, cands)
     ranked = sorted(cands, key=lambda c: (c["prod"] is None, c["prod"] if c["prod"] is not None else 9))
-    summary = ", ".join(f"{c['alpha_id']}({c['lane']}) {c['prod']}" for c in ranked)
+    summary = ", ".join(f"{c['alpha_id']}({c['lane']}) {c['prod']}"
+                        + ("" if c.get("prod_from", "now") == "now" else f" [{c['prod_from']}]") for c in ranked)
     _log(conn, account, day, "daily_candidates", detail=summary[:900])
     submitted = 0
     for c in ranked:
@@ -308,7 +336,8 @@ def daily_one(conn, catalog, account: str, acfg: dict, cfg: dict, dry_run: bool)
         if not r.get("submitted"):
             _log(conn, account, day, "submit_failed", aid, c.get("candidate_id"), r)
             continue
-        detail = (f"sharpe {c['sharpe']} TO {c['turnover']} prod {c['prod']} at {r.get('dateSubmitted')} | "
+        detail = (f"sharpe {c['sharpe']} TO {c['turnover']} prod {c['prod']}"
+                  + ("" if c.get("prod_from", "now") == "now" else f" ({c['prod_from']})") + f" at {r.get('dateSubmitted')} | "
                   f"least correlated of {len(ranked)}")
         if c["lane"] == "pp":
             conn.execute("update picks set status='submitted', decided_at=current_timestamp, note=? where alpha_id=?",

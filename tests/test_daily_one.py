@@ -72,3 +72,27 @@ def test_dry_run_names_it_without_submitting(monkeypatch):
     conn, b = _setup(monkeypatch)
     out = autosubmit.daily_one(conn, None, "A", ACFG, {}, dry_run=True)
     assert b.submitted == [] and out["least_correlated"] == "R1"
+
+
+def test_unanswered_prod_correlation_is_retried_then_taken_from_earlier(monkeypatch):
+    conn, b = _setup(monkeypatch)
+    waits = []
+
+    def slow(url, max_wait=0):
+        waits.append((url.split("/")[-3], max_wait))
+        raise TimeoutError(url)
+
+    b._poll = slow
+    monkeypatch.setattr(autosubmit.regular, "run_account", lambda *a, **k: {"status": "done"})
+    # P1's check carries 0.62; P2's endpoint never answers and nothing was seen before: P1 goes in
+    out = autosubmit.daily_one(conn, None, "A", ACFG, {}, dry_run=False)
+    assert b.submitted == ["P1"] and waits == [("P2", autosubmit.PROD_FIRST_WAIT), ("P2", autosubmit.PROD_SECOND_WAIT)]
+    # next day: a value BRAIN gave for P2 earlier counts when the endpoint is silent again
+    conn2, b2 = _setup(monkeypatch)
+    b2._poll = slow
+    monkeypatch.setattr(autosubmit.regular, "run_account", lambda *a, **k: {"status": "done"})
+    conn2.executescript(autosubmit.SCHEMA)
+    conn2.execute("insert into prod_corr_seen(alpha_id, value) values ('P2', 0.3)")
+    autosubmit.daily_one(conn2, None, "A", ACFG, {}, dry_run=False)
+    assert b2.submitted == ["P2"]
+    assert "[seen " in conn2.execute("select detail from autosubmit_log where action='daily_candidates'").fetchone()[0]
