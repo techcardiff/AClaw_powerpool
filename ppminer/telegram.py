@@ -100,7 +100,7 @@ class Telegram:
         return self.call("getUpdates", offset=offset, timeout=timeout, allowed_updates=["message"])
 
 
-CONTROL = ("/status", "/queue", "/pause", "/resume", "/regions", "/focus", "/pass")
+CONTROL = ("/status", "/queue", "/pause", "/resume", "/regions", "/focus", "/pass", "/advise")
 
 
 def _log(msg: str) -> None:
@@ -304,6 +304,10 @@ class Broker:
             if acc is None or acc not in mine:
                 self.tg.send(chat, f"Which account? {cmd} {' | '.join(mine)} …")
                 return
+            if cmd == "/advise":                 # BRAIN list + Qwen can take a minute: don't hold up the bot
+                self.tg.send(chat, f"🧭 {acc}: looking at sessions, themes, scopes and the queue…")
+                threading.Thread(target=self.advise, args=(chat, acc), daemon=True).start()
+                return
             if cmd == "/queue":
                 msg = ctl.queue(acc)
             elif cmd == "/pause":
@@ -320,10 +324,25 @@ class Broker:
             msg = f"Couldn't do that: {e}"
         _log(f"control {cmd} {acc} by chat {chat}: {msg.splitlines()[0][:100]}")
         self.tg.send(chat, msg)
-        if cmd != "/queue":                      # admins see what owners change on their accounts
+        if cmd not in ("/queue", "/advise"):     # admins see what owners change on their accounts
             for admin in self.cfg["admin_chat_ids"]:
                 if admin != chat:
                     self.tg.send(admin, f"(by {acc}'s owner) {msg}")
+
+    def advise(self, chat, acc: str) -> None:
+        from . import advise as adv, control as ctl
+        try:
+            conn = ctl.db()
+            try:
+                left = self.session_left(acc)
+                counts = adv.scope_counts(acc) if left is not None else {}
+                text = adv.advise(conn, acc, counts, left)
+            finally:
+                conn.close()
+        except Exception as e:
+            text = f"🧭 {acc}: couldn't build advice ({str(e)[:150]})"
+        _log(f"advise {acc} for chat {chat}: {text.splitlines()[0][:80]}")
+        self.tg.send(chat, text[:4000])
 
     # ── bot commands ────────────────────────────────────────────────────────
     def allowed(self, chat_id, account: str | None = None) -> bool:

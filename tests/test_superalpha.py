@@ -171,3 +171,19 @@ def test_brain_error_variants_are_not_resent_every_pass(monkeypatch):
     assert superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)["simulated"] == 0 and len(sent) == n
     superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert len(sent) == n and b.submitted == []
+
+
+def test_too_few_components_is_retried_after_a_day(monkeypatch):
+    sent = []
+
+    def fail(brain, sel, combo, st, max_wait=0):
+        sent.append(st["region"])
+        raise RuntimeError("super simulation failed: ERROR At least 10 component alphas are required for Super Alpha.")
+
+    monkeypatch.setattr(superalpha, "simulate", fail)
+    conn, b = _conn(), FakeBrain()
+    n = len(superalpha.SELECTIONS) * len(superalpha.COMBOS) * len(superalpha.SCOPES)
+    superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    conn.execute("update super_alphas set created_at=datetime('now', '-2 days')")
+    superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert len(sent) == 2 * n

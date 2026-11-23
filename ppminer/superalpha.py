@@ -146,7 +146,11 @@ def simulate_grid(conn, brain: Brain, account: str, st: dict | None = None, sele
     if missing_only:
         have = {_key(r["selection"], r["combo"], json.loads(r["settings"] or "{}")) for r in conn.execute(
             f"""select selection, combo, settings from super_alphas where account=?
-                and created_at >= datetime('now', '-{FRESH_DAYS} days')""", (account,))}
+                and created_at >= datetime('now', '-{FRESH_DAYS} days')
+                and not (status='failed' and detail like '%At least 10 component%'
+                         and created_at < datetime('now', '-1 day'))""", (account,))}
+        # a scope refused for having < 10 submitted alphas is tried again after a day, not FRESH_DAYS:
+        # HT52122's EUR D1 reached 10 on 23 Nov, two days after its variants were refused
         jobs = [j for j in jobs if _key(*j) not in have]
 
     def one(job):

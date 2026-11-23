@@ -23,6 +23,7 @@ from .report import DB_PATH
 REGIONS = ("USA", "EUR", "ASI", "GLB", "CHN", "JPN", "KOR", "TWN", "HKG", "IND", "AMR")
 HELP = """Commands (account can be left out if you own just one):
 /status — sessions, simulations, pauses, focus, next submit pass
+/advise [account] — what to do next: Power Pool theme, Osmosis, super alphas (Qwen)
 /queue [account] — best alphas waiting to be submitted
 /report [today] — the daily report (admins)
 /pause [account] [hours] — stop simulating (default 2 h)

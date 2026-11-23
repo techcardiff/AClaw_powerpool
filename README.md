@@ -175,6 +175,13 @@ Control panel (`ppminer/control.py`): owners steer their own account from the bo
 needed; the scheduler stays the only submitter, and submission counts, dry run and the quality bar are not
 changeable from Telegram. Admins get a copy of every change an owner makes.
 
+`/advise [account]` (`ppminer/advise.py`): a checklist built from the data (session, Power Pool phase and
+theme, Osmosis and super-alpha scopes from BRAIN's list of submitted alphas, queue and simulations per
+scope/region), each item with the command that acts on it, then Qwen3.8's top 1-3 priorities. Qwen only
+ranks and explains the checklist; lines naming a command that isn't in it are dropped. The workstation
+reaches Qwen through `~/.ssh/id_qwen_tunnel`, a key the 3080 allows only to forward to 127.0.0.1:18060
+(started by `scripts/start_ws_broker.sh`, log `data/logs/qwen_tunnel.log`); the miner's Qwen ideas use it too.
+
 Notices (sent by `telegram run`, never during `quiet_hours`; held back until they end):
 
 | When | Owner gets | Admins (`admin_chat_ids`) get |
