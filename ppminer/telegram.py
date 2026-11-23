@@ -9,7 +9,7 @@ Flow per account (same protocol as WorldQuant's own course library):
      session cookie to data/secrets/<account>.cookie (what resim/explore use).
 
 Config: data/secrets/telegram.json (mode 600), see telegram.example.json.
-Run:    python -m ppminer telegram run      (bot + automatic renewals)
+Run:    python -m ppminer telegram run      (bot + automatic renewals + daily report, see report.py)
 """
 from __future__ import annotations
 
@@ -69,6 +69,7 @@ DEFAULTS = {
     "retry_after_minutes": 60,     # resend an unanswered link at most hourly
     "admin_chat_ids": [],          # get copies of everyone's logout / login-ok notices
     "auto_prompt": True,           # false = only notify, owner sends /login themselves
+    "report": {},                  # daily report: {"chat_ids": [...], "enabled": true}; chat_ids default admin_chat_ids
 }
 
 
@@ -251,6 +252,37 @@ class Broker:
             started.append(account)
         return started
 
+    # ── daily report ────────────────────────────────────────────────────────
+    def session_left(self, account: str):
+        who = ck.whoami(ck.load_cookie(account)) if account in ck.saved_accounts() else None
+        return (who.get("expiry_seconds") or 0) / 3600 if who else None
+
+    def report_text(self, day=None, partial: bool = False) -> str:
+        from . import report
+        conn = report.connect()
+        try:
+            return report.build(conn, list(self.cfg["accounts"]), day or report.due_day(), self.session_left, partial)
+        finally:
+            conn.close()
+
+    def maybe_report(self) -> bool:
+        """Once per BRAIN day, after it ends (00:05 New York): what went in and how simulations went."""
+        from . import report
+        rcfg = self.cfg.get("report") or {}
+        if not rcfg.get("enabled", True):
+            return False
+        day = report.due_day()
+        if report.last_sent() >= str(day):
+            return False
+        text = self.report_text(day)
+        for chat in rcfg.get("chat_ids") or self.cfg["admin_chat_ids"]:
+            try:
+                self.tg.send(chat, text)
+            except Exception as e:                     # one bad chat id mustn't stop the others
+                _log(f"report to {chat} failed: {e}")
+        report.mark_sent(day)
+        return True
+
     # ── bot commands ────────────────────────────────────────────────────────
     def allowed(self, chat_id, account: str | None = None) -> bool:
         if chat_id in self.cfg["admin_chat_ids"]:
@@ -278,6 +310,10 @@ class Broker:
                 lines.append(f"{'🟢' if who else '🔴'} {n}: " + (f"live, {_hours(who.get('expiry_seconds'))} left"
                                                                  if who else "no live session"))
             self.tg.send(chat, "\n".join(lines) or "no accounts")
+        elif cmd == "/report" and chat in self.cfg["admin_chat_ids"]:
+            from .quota import ny_now
+            today = arg.strip().lower() == "today"
+            self.tg.send(chat, self.report_text(ny_now().date() if today else None, partial=today))
         elif cmd == "/login":
             targets = [arg.strip()] if arg.strip() else mine
             for n in targets:
@@ -286,7 +322,7 @@ class Broker:
                     continue
                 threading.Thread(target=self.login, args=(n, "requested"), daemon=True).start()
         else:
-            self.tg.send(chat, "Commands: /status, /login [account], /id")
+            self.tg.send(chat, "Commands: /status, /login [account], /report [today], /id")
 
     def run(self, tick_seconds: int = 300) -> None:
         def scheduler():
@@ -295,6 +331,10 @@ class Broker:
                     self.tick()
                 except Exception as e:                 # keep the daemon alive
                     print(f"scheduler error: {e}")
+                try:
+                    self.maybe_report()
+                except Exception as e:
+                    print(f"report error: {e}")
                 self.sleep(tick_seconds)
 
         threading.Thread(target=scheduler, daemon=True).start()

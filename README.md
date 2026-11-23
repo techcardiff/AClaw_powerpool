@@ -160,6 +160,14 @@ always done by the account's owner; the bot only delivers the link.
 
 One-off: `telegram login --account HT52122`, or the "Send Telegram login" button in the dashboard.
 
+Daily report (`ppminer/report.py`, since 23 Nov): just after BRAIN's day ends (00:05 New York, 13:05 CST in
+winter) the broker sends each account's submissions for that day (lane, scope, Sharpe, production
+correlation), its simulations (done, errors, best Sharpe), what's queued, new super variants, and roughly how
+long the session was logged out. It goes to `"report": {"chat_ids": [...]}` in telegram.json, by default the
+`admin_chat_ids`; for a channel, add the bot to it as an admin and put the channel's id (-100…) there.
+`/report` sends it on demand (admins only), `/report today` for the day so far. It reads `data/pp.db` on the
+broker's machine, which is the submitter's while the workstation submits.
+
 Notices (sent by `telegram run`, never during `quiet_hours`; held back until they end):
 
 | When | Owner gets | Admins (`admin_chat_ids`) get |
