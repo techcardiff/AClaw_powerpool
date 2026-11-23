@@ -162,11 +162,18 @@ One-off: `telegram login --account HT52122`, or the "Send Telegram login" button
 
 Daily report (`ppminer/report.py`, since 23 Nov): just after BRAIN's day ends (00:05 New York, 13:05 CST in
 winter) the broker sends each account's submissions for that day (lane, scope, Sharpe, production
-correlation), its simulations (done, errors, best Sharpe), what's queued, new super variants, and roughly how
-long the session was logged out. It goes to `"report": {"chat_ids": [...]}` in telegram.json, by default the
+correlation), its simulations (done, errors, best Sharpe), what's queued, new super variants, and in how many
+hours it simulated. It goes to `"report": {"chat_ids": [...]}` in telegram.json, by default the
 `admin_chat_ids`; for a channel, add the bot to it as an admin and put the channel's id (-100…) there.
 `/report` sends it on demand (admins only), `/report today` for the day so far. It reads `data/pp.db` on the
 broker's machine, which is the submitter's while the workstation submits.
+
+Control panel (`ppminer/control.py`): owners steer their own account from the bot, admins any account.
+`/status`, `/queue`, `/pause [h]`, `/resume`, `/regions EUR GLB|all`, `/focus EUR/1 GLB/1 [days]|off`, `/pass`
+(run the submit pass now). They change only what the `daily` scheduler already re-reads every 15 s
+(`data/autosubmit.json` regions / scope_targets, runner_state pause and last-pass keys), so no restart is
+needed; the scheduler stays the only submitter, and submission counts, dry run and the quality bar are not
+changeable from Telegram. Admins get a copy of every change an owner makes.
 
 Notices (sent by `telegram run`, never during `quiet_hours`; held back until they end):
 

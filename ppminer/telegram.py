@@ -100,6 +100,9 @@ class Telegram:
         return self.call("getUpdates", offset=offset, timeout=timeout, allowed_updates=["message"])
 
 
+CONTROL = ("/status", "/queue", "/pause", "/resume", "/regions", "/focus", "/pass")
+
+
 def _log(msg: str) -> None:
     print(time.strftime("%m-%d %H:%M:%S"), msg, flush=True)
 
@@ -168,7 +171,10 @@ class Broker:
         if r.status_code == 201:
             return self._finish(account, s, chat, "logged in (no face scan needed)")
         if not (r.status_code == 401 and r.headers.get("WWW-Authenticate") == "persona" and r.headers.get("Location")):
-            self.tg.send(chat, f"⚠️ {account}: BRAIN login failed (HTTP {r.status_code}). Check email/password in telegram.json.")
+            # 23 Nov: BRAIN answered 500 for a while and owners were told to check their password
+            why = ("BRAIN's server had an error; the next try is in a few minutes" if r.status_code >= 500
+                   else "check email/password in telegram.json")
+            self.tg.send(chat, f"⚠️ {account}: BRAIN login failed (HTTP {r.status_code}): {why}.")
             return False
         link = urljoin(r.url, r.headers["Location"])
         wait = self.cfg["scan_wait_minutes"] * 60
@@ -283,6 +289,42 @@ class Broker:
         report.mark_sent(day)
         return True
 
+    # ── control panel (control.py) ──────────────────────────────────────────
+    def control(self, chat, cmd: str, words: list[str], mine: list[str]) -> None:
+        from . import control as ctl
+        try:
+            if cmd == "/status":
+                self.tg.send(chat, ctl.status(mine, self.session_left) or "no accounts")
+                return
+            acc = None
+            if words and words[0] in self.cfg["accounts"]:
+                acc = words.pop(0)
+            elif len(mine) == 1:
+                acc = mine[0]
+            if acc is None or acc not in mine:
+                self.tg.send(chat, f"Which account? {cmd} {' | '.join(mine)} …")
+                return
+            if cmd == "/queue":
+                msg = ctl.queue(acc)
+            elif cmd == "/pause":
+                msg = ctl.pause(acc, float(words[0]) if words else 2.0)
+            elif cmd == "/resume":
+                msg = ctl.resume(acc)
+            elif cmd == "/regions":
+                msg = ctl.regions(acc, words)
+            elif cmd == "/focus":
+                msg = ctl.focus(acc, words)
+            else:
+                msg = ctl.run_pass(acc)
+        except (ValueError, KeyError) as e:
+            msg = f"Couldn't do that: {e}"
+        _log(f"control {cmd} {acc} by chat {chat}: {msg.splitlines()[0][:100]}")
+        self.tg.send(chat, msg)
+        if cmd != "/queue":                      # admins see what owners change on their accounts
+            for admin in self.cfg["admin_chat_ids"]:
+                if admin != chat:
+                    self.tg.send(admin, f"(by {acc}'s owner) {msg}")
+
     # ── bot commands ────────────────────────────────────────────────────────
     def allowed(self, chat_id, account: str | None = None) -> bool:
         if chat_id in self.cfg["admin_chat_ids"]:
@@ -303,13 +345,8 @@ class Broker:
             return                                   # ignore strangers
         mine = [n for n, a in self.cfg["accounts"].items()
                 if a["chat_id"] == chat or chat in self.cfg["admin_chat_ids"]]
-        if cmd == "/status":
-            lines = []
-            for n in mine:
-                who = ck.whoami(ck.load_cookie(n)) if n in ck.saved_accounts() else None
-                lines.append(f"{'🟢' if who else '🔴'} {n}: " + (f"live, {_hours(who.get('expiry_seconds'))} left"
-                                                                 if who else "no live session"))
-            self.tg.send(chat, "\n".join(lines) or "no accounts")
+        if cmd in CONTROL:
+            self.control(chat, cmd, arg.split(), mine)
         elif cmd == "/report" and chat in self.cfg["admin_chat_ids"]:
             from .quota import ny_now
             today = arg.strip().lower() == "today"
@@ -322,7 +359,8 @@ class Broker:
                     continue
                 threading.Thread(target=self.login, args=(n, "requested"), daemon=True).start()
         else:
-            self.tg.send(chat, "Commands: /status, /login [account], /report [today], /id")
+            from .control import HELP
+            self.tg.send(chat, HELP)
 
     def run(self, tick_seconds: int = 300) -> None:
         def scheduler():

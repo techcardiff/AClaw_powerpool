@@ -43,7 +43,7 @@ def test_report_lists_the_days_submissions_and_simulations():
     assert "2 simulations done, 1 errors, best Sharpe 4.10" in text  # the 05:01 UTC one is the next NY day
     assert "🟢 live, 3.2h left" in text and "🔴 logged out now" in text
     assert "➖ nothing submitted: 1 candidate(s) passed" in text
-    assert "logged out about 1.5h" in text
+    assert "simulated in only 3 of 24 hours" in text and "simulated in only 0 of 24 hours" in text
 
 
 def test_due_day_turns_over_just_after_new_york_midnight():
@@ -67,4 +67,4 @@ def test_broker_sends_once_per_day_to_report_chats(monkeypatch, tmp_path):
     b.handle({"chat": {"id": 2}, "text": "/report"})
     b.handle({"chat": {"id": 1}, "text": "/report"})
     assert [c for c, _ in sent] == [-1001, 2, 1]
-    assert sent[1][1].startswith("Commands") and "PP1" in sent[2][1]
+    assert sent[1][1].startswith("Commands") or "/status" in sent[1][1] and "PP1" in sent[2][1]

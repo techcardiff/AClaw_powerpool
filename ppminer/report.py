@@ -102,10 +102,10 @@ def simulations(conn, account: str, day: dt.date) -> dict:
                                         "and created_at<? and status!='failed'", (account, a, b)).fetchone()[0]
         out["super_waiting"] = conn.execute("select count(*) from super_alphas where account=? and status='simulated'",
                                             (account,)).fetchone()[0]
-    # the scheduler logs waiting_login about every 15 s while the session is down: count distinct minutes
-    out["logged_out_h"] = conn.execute(
-        "select count(distinct strftime('%Y-%m-%d %H:%M', ts)) from autosubmit_log where account=? "
-        "and action='waiting_login' and ts>=? and ts<?", (account, a, b)).fetchone()[0] / 60
+    # hours with at least one simulation: 23 Nov, YO50689 simulated in 3 of 24 hours (no session the rest);
+    # waiting_login log lines undercounted that, they only appear while a submit pass is due
+    out["active_h"] = conn.execute("select count(distinct strftime('%Y-%m-%d %H', created_at)) from resims "
+                                   "where account=? and created_at>=? and created_at<?", (account, a, b)).fetchone()[0]
     return out
 
 
@@ -151,8 +151,8 @@ def build(conn, accounts: list[str], day: dt.date, session=None, partial: bool =
         lines.append(f"📥 queued: {sim['picks']} Power Pool picks, {sim['regular']} regular alphas")
         if "super_new" in sim and (sim["super_new"] or sim["super_waiting"]):
             lines.append(f"🧩 super: {sim['super_new']} new variants, {sim['super_waiting']} waiting on BRAIN's check")
-        if sim["logged_out_h"] >= 0.5:
-            lines.append(f"⏸ logged out about {sim['logged_out_h']:.1f}h of the day")
+        if not partial and sim["active_h"] < 20:
+            lines.append(f"⏱ simulated in only {sim['active_h']} of 24 hours (usually no live session the rest)")
     return "\n".join(lines)
 
 
