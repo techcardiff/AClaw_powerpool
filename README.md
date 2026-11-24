@@ -96,6 +96,13 @@ both lanes only collect the candidates that pass everything (fresh check include
 lowest production correlation is submitted, and the rest stay queued for later days
 (`autosubmit.daily_one`). The super alpha keeps its own one a day.
 
+Correlations BRAIN leaves pending (24 Nov, `ppminer/corrwarm.py`): YO50689's best alphas were skipped for a
+week as "self-correlation still computing", since each pass waits 60 s and BRAIN refuses a submission while
+its check still says PENDING. Between passes the scheduler now asks BRAIN's correlation endpoints for those
+alphas with 8-minute waits, one at a time (best Sharpe first, each at most every 12 h), stores the answers
+(`corr_warm`, production ones also in `prod_corr_seen`) and makes the account's submit pass due when any came
+back. `"corr_warm": false` in autosubmit.json turns it off.
+
 Checks are done in two sweeps (21 Nov): every candidate's BRAIN check gets 45 s, then the ones BRAIN
 hadn't finished get 150 s more at the end of the pass, within 20 minutes in all. Before, each pending
 check held the pass for 3 minutes in turn, and on 20 Nov HT52122's session expired before anything

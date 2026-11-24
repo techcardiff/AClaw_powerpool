@@ -88,6 +88,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
     log(f"daily scheduler start (cleared {n} unfinished jobs from a previous run)")
     last_theme = None
     submitter: threading.Thread | None = None
+    warmer: threading.Thread | None = None
     miners: dict[str, threading.Thread] = {}
     while time.time() < t_end:
         cfg = autosubmit.load_config()
@@ -112,6 +113,12 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
             submitter = threading.Thread(target=_autosubmit, args=(db_path, catalog_dir, due), daemon=True,
                                          name="autosubmit")
             submitter.start()
+        # between passes: long waits on BRAIN's correlation endpoints for alphas the passes keep
+        # skipping as pending (corrwarm.py); one alpha at a time, a round every 20 min
+        if cfg.get("corr_warm", True) and (warmer is None or not warmer.is_alive()):
+            from . import corrwarm
+            warmer = threading.Thread(target=corrwarm.loop, args=(db_path, accounts, log), daemon=True, name="corrwarm")
+            warmer.start()
         mxc = cfg.get("market_explore", {"enabled": True, "regions": ["EUR", "ASI", "GLB"]})
         mx_regions = mxc.get("regions") if mxc.get("enabled", True) else None
         if mx_regions and theme is not None:   # the theme region is Lane A's now, not exploration's
