@@ -187,3 +187,15 @@ def test_too_few_components_is_retried_after_a_day(monkeypatch):
     conn.execute("update super_alphas set created_at=datetime('now', '-2 days')")
     superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert len(sent) == 2 * n
+
+
+def test_no_records_means_nothing_to_collide_with():
+    class B(FakeBrain):
+        def _poll(self, url, max_wait=0):
+            if url.endswith("/self"):
+                return {"max": None, "min": None, "records": []}
+            if url.endswith("/prod"):
+                return {"max": 0.69, "records": [{}]}
+            return super()._poll(url, max_wait)
+
+    assert superalpha.correlations(B(), "X") == {"self": 0.0, "prod": 0.69}

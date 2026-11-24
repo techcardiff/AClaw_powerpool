@@ -37,6 +37,13 @@ create table if not exists super_alphas (
     primary key (account, alpha_id));
 """
 SELECTIONS = ("and(self_correlation < 0.4, turnover < 0.3)",
+              # 24 Nov: every alpha of the scope; EUR D1 has exactly the 10 BRAIN needs, and any filter
+              # left fewer (MP6rpMJk: EUR, all 10, Sharpe 5.42, prod 0.696)
+              "1",
+              # 24 Nov: outside wpoamxdQ's pool (self < 0.4, turnover < 0.3): self-correlation with it
+              # drops to ~0.5; the production filter keeps what the production pool lacks
+              "and(self_correlation >= 0.4, prod_correlation < 0.6)",
+              "and(turnover >= 0.2, prod_correlation < 0.6)",
               "and(self_correlation < 0.5, prod_correlation < 0.5)",
               # 21 Nov: other subsets of the USA D1 pool than wpoamxdQ's (self < 0.4, turnover < 0.3),
               # since only USA D1 has the 10 component alphas BRAIN needs (EUR D1 has 9)
@@ -213,7 +220,10 @@ def correlations(brain: Brain, aid: str, max_wait: int = CORRELATION_WAIT) -> di
     out = {}
     for kind in ("self", "prod"):
         try:
-            out[kind] = brain._poll(f"{BASE}/alphas/{aid}/correlations/{kind}", max_wait=max_wait).get("max")
+            j = brain._poll(f"{BASE}/alphas/{aid}/correlations/{kind}", max_wait=max_wait)
+            # 24 Nov: the first EUR super alpha (MP6rpMJk) got self max None with no records at
+            # all: there is nothing of its kind to collide with, which is a pass, not unknown
+            out[kind] = 0.0 if j.get("max") is None and "records" in j and not j["records"] else j.get("max")
         except AuthRequired:
             raise
         except Exception:
