@@ -60,6 +60,7 @@ FRESH_DAYS = 5                       # simulated variants older than this are si
 OK_WARNINGS = {"MATCHES_COMPETITION", "OSMOSIS_ALLOCATION", "MATCHES_THEMES", "MATCHES_PYRAMID"}
 MUST_PASS = ("SELF_CORRELATION", "PROD_CORRELATION")
 MIN_DESCRIPTION = 100
+BLIND_TRIES = 2                      # submits per pass with correlation unknown; BRAIN's submit checks decide
 MAX_CORRELATION = 0.7                # BRAIN's self/prod correlation limit
 # 20 Nov: /check and the correlation endpoints answered none of the 5 stored variants all
 # afternoon; 5 min on each in turn found nothing and the new grid never ran. Short waits now,
@@ -247,6 +248,7 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
     simulated = simulate_grid(conn, brain, account, st, log=lambda m: log("super_sim", detail=m.strip()),
                               missing_only=True)
     rows = fresh()
+    blind = 0
     for row in rows:
         aid = row["alpha_id"]
         sel_d, combo_d = describe(row["selection"], row["combo"], json.loads(row["settings"] or "{}"))
@@ -288,11 +290,18 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
                 log("super_skip", aid, f"correlations {corr} >= {MAX_CORRELATION}; dropped")
                 continue
             if None in corr.values():
-                log("super_skip", aid, f"{why}; correlations {corr}; next run")
-                continue
-            # /check lags behind the correlation endpoints: both are under the limit, so try; a
-            # refusal from BRAIN only moves on to the next variant
-            why = f"/check still PENDING, correlations self {corr['self']} prod {corr['prod']}"
+                # 24 Nov: under throttling BRAIN answered neither /check nor the correlation endpoints
+                # for hours. Submitting makes BRAIN run the same checks itself and refuse on a failure,
+                # so try it for the best few each pass instead of waiting
+                if blind >= BLIND_TRIES:
+                    log("super_skip", aid, f"{why}; correlations {corr}; next run")
+                    continue
+                blind += 1
+                why = f"{why}; correlations unknown {corr}; submitting so BRAIN checks it"
+            else:
+                # /check lags behind the correlation endpoints: both are under the limit, so try; a
+                # refusal from BRAIN only moves on to the next variant
+                why = f"/check still PENDING, correlations self {corr['self']} prod {corr['prod']}"
             log("super_try", aid, why)
         if dry_run:
             log("super_dry_run", aid, f"would submit super alpha: sharpe {row['sharpe']} fitness {row['fitness']} "

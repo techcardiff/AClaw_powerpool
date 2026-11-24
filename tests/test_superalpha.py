@@ -127,6 +127,10 @@ def test_unanswered_old_variants_dont_hold_back_the_grid():
             assert max_wait <= superalpha.CHECK_WAIT
             raise TimeoutError(aid)
 
+        def submit(self, aid):          # BRAIN refuses while its correlation is still pending
+            self.submitted.append(aid)
+            return {"submitted": False, "refused": ["SELF_CORRELATION PENDING"]}
+
         def _poll(self, url, max_wait=0):
             if "/correlations/" in url:
                 raise TimeoutError(url)
@@ -199,3 +203,29 @@ def test_no_records_means_nothing_to_collide_with():
             return super()._poll(url, max_wait)
 
     assert superalpha.correlations(B(), "X") == {"self": 0.0, "prod": 0.69}
+
+
+def test_unknown_correlations_submit_and_let_brain_decide():
+    pend = [x if x["name"] not in ("SELF_CORRELATION", "PROD_CORRELATION") else c(x["name"], "PENDING") for x in BASE_OK]
+
+    class B(FakeBrain):
+        def check(self, aid, max_wait=0):
+            raise TimeoutError(aid)
+
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                raise TimeoutError(url)
+            return super()._poll(url, max_wait)
+
+        def submit(self, aid):
+            self.submitted.append(aid)
+            return {"submitted": False, "refused": ["SELF_CORRELATION PENDING"]}
+
+    conn, b = _conn(), B()
+    superalpha.migrate(conn)
+    for i in range(4):
+        conn.execute("insert into super_alphas(account, alpha_id, selection, combo, settings, fitness, status) "
+                     "values ('HT52122', ?, '1', 'combo_a(alpha)', '{}', ?, 'simulated')", (f"Q{i}", 5 - i))
+    conn.commit()
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert out["submitted"] == 0 and len(b.submitted) == superalpha.BLIND_TRIES
