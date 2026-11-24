@@ -240,6 +240,9 @@ def usable_ideas(conn: sqlite3.Connection, account: str, others: list[str] = (),
     for r in rows:
         if r["id"] not in o_ids:
             out[r["region"]] = out.get(r["region"], 0) + 1
+            if r["delay"] is not None and r["delay"] != 1:       # e.g. "USA/0", for explore_delay0
+                k = f"{r['region']}/{r['delay']}"
+                out[k] = out.get(k, 0) + 1
     return out
 
 

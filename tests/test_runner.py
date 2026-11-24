@@ -422,7 +422,7 @@ def _cycle_env(monkeypatch, tmp_path, ids_seq, prep_seconds):
     conn = connect(str(tmp_path / "pp.db"))
     events, batches = [], list(ids_seq)
 
-    def fake_prepare(c, catalog, account, regions, others, theme):
+    def fake_prepare(c, catalog, account, regions, others, theme, delay0=()):
         assert threading.current_thread() is not threading.main_thread()
         events.append(("qwen start", _t.time()))
         _t.sleep(prep_seconds)
@@ -469,3 +469,20 @@ def test_qwen_thread_is_joined_when_the_pass_fails(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         runner.cycle(conn, None, "HT52122")
     assert ("qwen end" in dict(events))
+
+
+def test_delay0_ideas_get_their_own_round_robin_group(monkeypatch):
+    import sqlite3, json
+    from ppminer import db, select
+    monkeypatch.setattr(select, "_shape", lambda sk: sk)          # every idea its own shape here
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.executescript(db.SCHEMA)
+    # 2 older USA D0 ideas, then 30 newer USA D1 ones (new ideas go newest first): D0 must still show up
+    for i in range(32):
+        d = 0 if i < 2 else 1
+        c.execute("""insert into candidates(key, expr, region, delay, fields, categories, datasets, status, skeleton)
+                     values (?,?,?,?,?,?,?,'explore',?)""",
+                  (f"USA|{d}|e{i}", f"rank(f{i})", "USA", d, json.dumps([f"f{i}"]), '["x"]', json.dumps([f"ds{i}"]), f"s{i}"))
+    rows = select.shortlist(c, None, n=6, statuses=("explore",))
+    assert any(r["delay"] == 0 for r in rows)

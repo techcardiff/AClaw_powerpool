@@ -57,12 +57,12 @@ def test_no_session_comes_first_and_qwen_down_falls_back(conn, monkeypatch):
 def test_qwen_only_ranks_the_checklist_and_invented_commands_are_dropped(conn, monkeypatch):
     seen = {}
     monkeypatch.setattr(llm, "up", lambda: True)
-    reply = "→ EUR/1 first: one more alpha unlocks it. /focus HT EUR/1\n→ Submit now /pass HT\nnoise line"
+    reply = "→ EUR/1 first: one more alpha unlocks it. /focus HT EUR/1\n→ Pause it /pause HT\nnoise line"
     monkeypatch.setattr(llm, "chat", lambda msgs, **kw: seen.setdefault("m", msgs) and reply)
     text = advise.advise(conn, "HT", COUNTS, session_h=2.0)
     assert "EUR/1 has 9 submitted alphas" in text                       # checklist always there
     assert "Qwen's priorities:\n→ EUR/1 first: one more alpha unlocks it. /focus HT EUR/1" in text
-    assert "Submit now" not in text and "noise" not in text           # /pass wasn't in the checklist
+    assert "Pause it" not in text and "noise" not in text             # /pause is never in the checklist
     assert '"EUR/1": 9' in seen["m"][1]["content"] and "Osmosis" in seen["m"][0]["content"]
 
 

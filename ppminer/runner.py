@@ -412,6 +412,26 @@ def after_batch(conn, catalog, brain: Brain, account: str) -> int:
     return len(picks)
 
 
+def explore_delay0(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10,
+                   theme=None, others: list[str] = ()) -> int:
+    """Qwen ideas at delay 0 in accounts.<id>.delay0_regions (24 Nov: HT52122's USA D0 had 7 submitted
+    alphas, 3 short of counting for Osmosis, and only 9 candidates because nothing mined delay 0).
+    Needs that region's delay-0 fields, which the scheduler syncs alongside."""
+    from .explore import explore, fresh_datasets, save as save_explore
+    added = 0
+    usable = lanes.usable_ideas(conn, account, others)
+    for region in regions:
+        if usable.get(f"{region}/0", 0) >= min_queue:
+            continue
+        for ds in fresh_datasets(conn, account, region, delay=0)[:per_region]:
+            try:
+                added += save_explore(conn, ds, explore(_ro(conn), catalog, account, ds, region, delay=0, theme=theme),
+                                      region, delay=0)
+            except Exception as e:
+                log(f"  explore {region} D0/{ds['dataset']} failed: {e}")
+    return added
+
+
 def explore_regions(conn, catalog, account: str, regions: list[str], per_region: int = 3, min_queue: int = 10,
                     theme=None, others: list[str] = ()) -> int:
     """Keep a small stock of explore ideas Lane A can use, in every region the account has synced."""
@@ -478,7 +498,7 @@ def _db_path(conn) -> str:
     return conn.execute("pragma database_list").fetchone()[2]
 
 
-def prepare(conn, catalog, account: str, regions, others, theme) -> None:
+def prepare(conn, catalog, account: str, regions, others, theme, delay0=()) -> None:
     """The idea part of a pass: shape ideas (gen.py), then Qwen's revisions, explore ideas,
     market copies and theme ideas; shape ideas only, more of them, while Qwen is down."""
     from .llm import up
@@ -506,6 +526,10 @@ def prepare(conn, catalog, account: str, regions, others, theme) -> None:
     n = explore_regions(conn, catalog, account, list(regions), theme=theme, others=others)
     if n:
         log(f"[{account}] Qwen explore: {n} new ideas across {', '.join(regions)}")
+    if delay0:
+        n = explore_delay0(conn, catalog, account, list(delay0), others=others)
+        if n:
+            log(f"[{account}] Qwen explore delay 0: {n} new ideas in {', '.join(delay0)}")
     try:
         n = transfer.ideas(conn, catalog, account)
     except Exception as e:
@@ -519,12 +543,12 @@ def prepare(conn, catalog, account: str, regions, others, theme) -> None:
             log(f"[{account}] theme {theme.name}: {n} new Qwen ideas")
 
 
-def _prepare_safe(path: str, catalog, account: str, regions, others, theme) -> None:
+def _prepare_safe(path: str, catalog, account: str, regions, others, theme, delay0=()) -> None:
     """prepare() in its own thread, on its own connection (sqlite connections stay in their thread)."""
     from .db import connect
     c = connect(path)
     try:
-        prepare(c, catalog, account, regions, others, theme)
+        prepare(c, catalog, account, regions, others, theme, delay0)
     except Exception as e:
         log(f"[{account}] Qwen ideas: {e}")
     finally:
@@ -533,7 +557,7 @@ def _prepare_safe(path: str, catalog, account: str, regions, others, theme) -> N
 
 def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_share: float = 0.375, slots: int = 2,
           regions: list[str] = ("USA",), others: list[str] = (), sims_left: int = 10**9,
-          market_regions: list[str] | None = None, theme=None) -> dict:
+          market_regions: list[str] | None = None, theme=None, delay0: list[str] = ()) -> dict:
     """One round for one account: revise, top up explore ideas, simulate a batch, refresh picks."""
     brain = _brain(account)
     if brain is None:
@@ -544,7 +568,7 @@ def cycle(conn, catalog, account: str, *, batch: int = 8, workers: int = 4, c_sh
     # Qwen tops up ideas for the NEXT pass while this one simulates: run first, it took
     # 5-7 min of every ~33 min pass (7 Nov) with nothing simulating
     prep = threading.Thread(target=_prepare_safe, name=f"qwen-{account}", daemon=True,
-                            args=(_db_path(conn), catalog, account, regions, others, theme))
+                            args=(_db_path(conn), catalog, account, regions, others, theme, delay0))
     prep.start()
     try:
         return _pass(conn, catalog, brain, account, prep, batch=batch, workers=workers, c_share=c_share,

@@ -129,13 +129,17 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                 if own else regions
             try:
                 b = _brain(account)
-                for region in regions_ if b is not None else ():   # field catalogs: a few datasets per region
+                # accounts.<id>.delay0_regions: also mine these regions at delay 0 (fields synced the same way)
+                delay0 = [r.upper() for r in cfg["accounts"][account].get("delay0_regions") or []]
+                scopes = [(r, 1) for r in regions_] + [(r, 0) for r in delay0]
+                for region, delay in scopes if b is not None else ():   # field catalogs: a few datasets per scope
                     try:
-                        st = sync_step(c2, b, account, region)
+                        st = sync_step(c2, b, account, region, delay=delay)
                         if st["done"]:
-                            log(f"[{account}] fields {region}: +{st['done']} datasets, {st['remaining']} to go")
+                            log(f"[{account}] fields {region}{' D0' if delay == 0 else ''}: +{st['done']} datasets, "
+                                f"{st['remaining']} to go")
                     except Exception as e:
-                        log(f"[{account}] fields {region}: {e}")
+                        log(f"[{account}] fields {region}{' D0' if delay == 0 else ''}: {e}")
                 mx = marketx.connect()
                 try:
                     left = cap - sims_today(c2, account, mx)
@@ -153,6 +157,7 @@ def run(db_path: str, catalog_dir: str, hours: float = 24 * 365, batch: int = 30
                               slots=int(cfg.get("multisim_slots", 2)),           # multi-simulations (<= 10 each) in flight
                               market_regions=mx_regions,                         # template exploration in free slots
                               theme=theme,                                       # Lane A theme share
+                              delay0=delay0,                                     # Qwen ideas at delay 0
                               sims_left=left)                                    # daily simulation limit
             except Exception as e:
                 log(f"[{account}] cycle error: {e}")

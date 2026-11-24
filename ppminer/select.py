@@ -65,7 +65,9 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
         shape = _shape(row["skeleton"] or skeleton(row["expr"], lambda f: f))
         twin = (shape, _stems(json.loads(row["fields"])))
         is_new = row["sharpe"] is None           # explore/rewrite ideas, never simulated
-        if is_new and len(fresh_by_region.get(row["region"], [])) >= n:
+        # delay-0 ideas get their own round-robin group: mixed into the USA backlog they'd wait behind it
+        group = row["region"] if row["delay"] in (None, 1) else f"{row['region']}/{row['delay']}"
+        if is_new and len(fresh_by_region.get(group, [])) >= n:
             continue
         cap = 2 if is_new else max_per_dataset   # spread untested ideas over many datasets
         if per_ds[ds] >= cap or per_shape[(is_new, shape)] >= max_per_shape or twin in twins:
@@ -74,7 +76,7 @@ def shortlist(conn: sqlite3.Connection, theme: Theme | None, n: int = 40, *, sta
         per_shape[(is_new, shape)] += 1
         twins.add(twin)
         if is_new:
-            fresh_by_region.setdefault(row["region"], []).append(row)
+            fresh_by_region.setdefault(group, []).append(row)
         else:
             proven.append(row)
         if len(proven) >= n and sum(map(len, fresh_by_region.values())) >= 3 * n:

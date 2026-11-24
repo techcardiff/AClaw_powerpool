@@ -80,6 +80,10 @@ the nearest scopes before a cutoff, per account in `data/autosubmit.json`:
 - `"scope_targets": {"scopes": ["EUR/1", "USA/0"], "until": "2026-11-22"}`: auto-submit tries picks in
   those scopes first (most needed first), until that New York date.
 - `"regions": ["EUR", "GLB"]`: that account mines only there (the theme's regions stay in).
+- `"delay0_regions": ["USA"]` (24 Nov, HT52122): also mine those regions at delay 0. The scheduler syncs their
+  delay-0 field catalogs (USA D0: 118 datasets) and Qwen keeps a stock of delay-0 ideas; new delay-0 ideas get
+  their own round-robin group in Lane A so the USA D1 backlog doesn't bury them. BRAIN also allows HT52122
+  EUR, CHN, AMR, DEU and GBR at delay 0 and KOR, HKG, IND, AMR, DEU, GBR, CHN at delay 1 (24 Nov).
 - `python -m ppminer import-brain --account HT52122 --scope EUR/1 --pp-bar --regular`: pulls the
   account's own unsubmitted alphas of a scope in as candidates, and queues those that pass the regular
   bar but aren't Power Pool shapes for the regular lane.

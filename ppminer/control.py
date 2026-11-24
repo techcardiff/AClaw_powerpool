@@ -88,7 +88,8 @@ def status(accounts: list[str], session=None) -> str:
                 line.append(f"⏸ paused until {dt.datetime.fromtimestamp(pause):%H:%M} CST")
             if not a.get("enabled"):
                 line.append("⛔ disabled in autosubmit.json")
-            line.append(f"🌍 regions: {', '.join(a.get('regions') or cfg.get('regions', ['USA']))}")
+            line.append(f"🌍 regions: {', '.join(a.get('regions') or cfg.get('regions', ['USA']))}"
+                        + (f" + delay 0: {', '.join(a['delay0_regions'])}" if a.get("delay0_regions") else ""))
             st = a.get("scope_targets") or {}
             if st.get("scopes") and str(ny_now().date()) <= st.get("until", ""):
                 line.append(f"🎯 focus: {', '.join(st['scopes'])} until {st['until']}")
