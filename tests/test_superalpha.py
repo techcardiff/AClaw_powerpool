@@ -229,3 +229,18 @@ def test_unknown_correlations_submit_and_let_brain_decide():
     conn.commit()
     out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
     assert out["submitted"] == 0 and len(b.submitted) == superalpha.BLIND_TRIES
+
+
+def test_rate_limited_check_does_not_end_the_lane():
+    class B(FakeBrain):
+        def check(self, aid, max_wait=0):
+            raise RuntimeError("rate limited too long on /check")
+
+        def _poll(self, url, max_wait=0):
+            if "/correlations/" in url:
+                return {"max": 0.5, "records": [{}]}
+            return super()._poll(url, max_wait)
+
+    conn, b = _conn(), B()
+    out = superalpha.run_account(conn, "HT52122", dry_run=False, brain=b)
+    assert out["submitted"] == 1

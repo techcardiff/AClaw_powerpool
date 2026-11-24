@@ -259,8 +259,10 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
                 "combo": {"code": row["combo"], "description": combo_d}})
         try:
             c = brain.check(aid, max_wait=CHECK_WAIT)
-        except TimeoutError:
-            c = None                     # still running: the correlation endpoints may answer sooner
+        except AuthRequired:
+            raise
+        except Exception:                # timeout, or BRAIN's rate limit (24 Nov 17:08: "rate limited too
+            c = None                     # long" on /check ended the lane): treat as still running
         checks = (c.get("is") or {}).get("checks") or [] if c else [
             {"name": n, "result": "PENDING"} for n in MUST_PASS]
         if dry_run:   # without descriptions BRAIN fails the two length checks; judge as if they were set
@@ -307,7 +309,12 @@ def run_account(conn, account: str, dry_run: bool, brain: Brain | None = None, l
             log("super_dry_run", aid, f"would submit super alpha: sharpe {row['sharpe']} fitness {row['fitness']} "
                 f"| {row['selection']} | {row['combo']}")
             return {"status": "done", "submitted": 0, "would_submit": aid, "simulated": simulated}
-        res = brain.submit(aid)
+        try:
+            res = brain.submit(aid)
+        except AuthRequired:
+            raise
+        except Exception as e:
+            res = {"submitted": False, "refused": f"error: {str(e)[:150]}"}
         if not res.get("submitted"):
             log("super_submit_failed", aid, res)
             conn.execute("update super_alphas set detail=? where account=? and alpha_id=?",
